@@ -6,6 +6,10 @@ import time
 
 import lark_oapi as lark
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
+from lark_oapi.event.callback.model.p2_card_action_trigger import (
+    P2CardActionTrigger,
+    P2CardActionTriggerResponse,
+)
 
 from config.settings import settings
 from infra.dedup import dedup
@@ -18,6 +22,16 @@ event_queue: queue.Queue = queue.Queue(maxsize=1000)
 
 # Flag read by infra/health.py
 ws_connected = threading.Event()
+
+# Card-action callback, injected by main.py (keeps feishu/ free of bot/ imports).
+# Signature: (open_id: str, value: dict) -> tuple[str, dict | None]  (toast_text, updated_card)
+_card_action_handler = None
+
+
+def set_card_action_handler(fn) -> None:
+    """Inject the deterministic card-callback handler (bot.card_action_handler.handle)."""
+    global _card_action_handler
+    _card_action_handler = fn
 
 
 def _on_message(data: P2ImMessageReceiveV1) -> None:
@@ -36,6 +50,41 @@ def _on_message(data: P2ImMessageReceiveV1) -> None:
         metrics.inc("errors_queue_full")
 
 
+def _extract_card_action(data: P2CardActionTrigger):
+    """Pull (open_id, value) from a lark card action event."""
+    op = data.event.operator
+    open_id = getattr(op, "open_id", "") or ""
+    value = getattr(data.event.action, "value", None) or {}
+    return open_id, value
+
+
+def _build_card_action_response(toast_text: str, updated_card):
+    payload = {"toast": {"type": "info", "content": toast_text}}
+    if updated_card is not None:
+        payload["card"] = {"type": "raw", "data": updated_card}
+    return P2CardActionTriggerResponse(payload)
+
+
+def _toast_text(resp) -> str:
+    """Extract toast text from a response (test helper / introspection)."""
+    toast = getattr(resp, "toast", None)
+    return getattr(toast, "content", "") or ""
+
+
+def _on_card_action(data: P2CardActionTrigger):
+    """Synchronous card callback: run the deterministic action, return a toast."""
+    try:
+        open_id, value = _extract_card_action(data)
+        if _card_action_handler is None:
+            toast_text, updated_card = "操作处理未就绪，请稍后重试", None
+        else:
+            toast_text, updated_card = _card_action_handler(open_id, value)
+    except Exception:
+        log.exception("card action handling failed")
+        toast_text, updated_card = "操作处理失败，请稍后重试", None
+    return _build_card_action_response(toast_text, updated_card)
+
+
 def _build_client() -> lark.ws.Client:
     event_handler = (
         lark.EventDispatcherHandler.builder(
@@ -43,6 +92,7 @@ def _build_client() -> lark.ws.Client:
             verification_token=settings.FEISHU_VERIFY_TOKEN,
         )
         .register_p2_im_message_receive_v1(_on_message)
+        .register_p2_card_action_trigger(_on_card_action)
         .build()
     )
     return lark.ws.Client(

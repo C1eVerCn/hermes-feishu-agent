@@ -4,7 +4,8 @@ hermes-agent integration layer. Owns `AIAgent` lifecycle and the bridge from Fei
 
 ## Files
 
-- `handler.py` — consumes from the event queue; calls `agent_pool`, runs `AIAgent.chat()` in thread pool, calls `sender`
+- `handler.py` — consumes from the event queue; calls `agent_pool`, runs `AIAgent.chat()` in thread pool, clears/reads `ocl.tool_capture` around the call, runs OCL pipeline, sends an interactive card (or text fallback) via `sender`
+- `card_action_handler.py` — deterministic Feishu card-button callback: `handle(open_id, value)` → inject email + OCL role gate → call the matching `mock_tools.handlers` function → return `(toast_text, updated_card)`. No LLM. Injected into `feishu.ws_client` by `main.py`.
 - `agent_pool.py` — LRU pool of `AIAgent` instances keyed by `user_id`; max 100 entries; thread-safe. Generates stable `session_id = f"feishu_{user_id}"`, registers/evicts `ocl.session_map` mappings for the feishu_acl plugin.
 
 ## AIAgent rules

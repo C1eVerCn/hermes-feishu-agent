@@ -8,12 +8,17 @@ import threading
 import uvicorn
 
 from config.settings import settings
-from feishu.ws_client import start_ws_supervision
+from feishu.ws_client import start_ws_supervision, set_card_action_handler
 from bot.handler import start_consumer
+from bot.card_action_handler import handle as card_action_handle
 from infra.health import app
 
 
 def main() -> None:
+    # Inject the deterministic card-callback handler into the WS layer
+    # (keeps feishu/ free of bot/ imports).
+    set_card_action_handler(card_action_handle)
+
     consumer_thread = threading.Thread(target=start_consumer, daemon=True, name="consumer")
     ws_thread = threading.Thread(target=start_ws_supervision, daemon=True, name="ws-supervisor")
 
