@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 
 from ocl import permission
 from ocl.session_map import lookup as session_lookup
+from ocl import tool_capture
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,29 @@ def _on_pre_tool_call(
     return None
 
 
+def _on_post_tool_call(
+    tool_name: str = "",
+    args: Optional[Dict[str, Any]] = None,
+    result: Any = None,
+    task_id: str = "",
+    session_id: str = "",
+    tool_call_id: str = "",
+    **kwargs: Any,
+) -> None:
+    """Observational: capture each tool's raw result for deterministic card
+    rendering. Keyed by session_id. Fail-open — never raise into hermes."""
+    if not session_id:
+        return
+    try:
+        tool_capture.record(session_id, tool_name, result)
+    except Exception:
+        logger.exception(
+            "feishu_acl: capture failed tool=%s session=%s", tool_name, session_id,
+        )
+
+
 def register(ctx) -> None:
     """Plugin entry point. Called once by hermes's PluginManager."""
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
-    logger.info("feishu_acl plugin registered: pre_tool_call hook active")
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
+    logger.info("feishu_acl plugin registered: pre_tool_call + post_tool_call hooks active")
