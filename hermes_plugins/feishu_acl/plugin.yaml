@@ -1,0 +1,6 @@
+name: feishu_acl
+version: 0.1.0
+description: "Feishu per-user tool-call ACL. Blocks tool calls when the calling user lacks permission, using the pre_tool_call hook to enforce policy before the tool handler runs."
+author: "hermes-feishu-agent team"
+hooks:
+  - pre_tool_call

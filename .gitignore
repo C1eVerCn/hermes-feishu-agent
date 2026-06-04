@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+*.egg-info/
+.venv/
+~/.hermes/
+.DS_Store
+.qoder/
+data/*
+!data/identity_map.json.example

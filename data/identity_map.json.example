@@ -1,0 +1,5 @@
+{
+  "ou_REPLACE_zhang": {"email": "zhangsan@example.com", "name": "张三", "role": 1},
+  "ou_REPLACE_sched": {"email": "scheduler1@example.com", "name": "调度员1", "role": 2},
+  "ou_REPLACE_admin": {"email": "admin@example.com", "name": "王五", "role": 3}
+}
