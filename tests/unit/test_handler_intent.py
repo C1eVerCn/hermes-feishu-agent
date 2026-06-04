@@ -65,7 +65,7 @@ def test_set_role_bad_format_returns_empty():
 
 def test_non_platform_user_reply_constant():
     handler = _make_handler()
-    assert handler._NON_PLATFORM_REPLY.startswith("您还不是平台用户")
+    assert handler._NON_PLATFORM_REPLY_TEMPLATE.startswith("您还不是平台用户")
 
 
 # ── Layer 0: Simple intent instant replies ──────────────────────────────────

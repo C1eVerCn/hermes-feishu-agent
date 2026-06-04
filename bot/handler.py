@@ -24,7 +24,7 @@ _EMPTY_REPLY = "您好，请输入文字消息，我来为您解答。"
 _TIMEOUT_REPLY = "抱歉，响应超时（>120s），请稍后重试。"
 _ERROR_REPLY = "抱歉，处理您的消息时出现了错误，请稍后再试。"
 _INPUT_TOO_LONG_REPLY = "抱歉，消息过长（超过 8000 字），请分段发送。"
-_NON_PLATFORM_REPLY = "您还不是平台用户，请联系管理员开通台架预约权限。"
+_NON_PLATFORM_REPLY_TEMPLATE = "您还不是平台用户（您的 open_id: {open_id}），请联系管理员将您添加至 identity_map.json。"
 _MAX_INPUT_CHARS = 8000
 
 # ── Layer 0: Instant replies for simple intents (no agent, <1ms) ──────────
@@ -147,7 +147,7 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     # ── Identity gate: resolve email; non-platform users cannot use the agent ─
     email = identity.email_of(user_id)
     if not email:
-        sender.send(chat_id, _NON_PLATFORM_REPLY)
+        sender.send(chat_id, _NON_PLATFORM_REPLY_TEMPLATE.format(open_id=user_id))
         return
 
     # ── Agent call ──────────────────────────────────────────────────────────
