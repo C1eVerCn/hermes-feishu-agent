@@ -48,6 +48,38 @@ def send_to_user(open_id: str, text: str) -> None:
             time.sleep(RATE_LIMIT_INTERVAL)
 
 
+def send_card(chat_id: str, card: dict, max_retries: int = 3) -> None:
+    """Send an interactive card to a chat. Rate-limited like text sends."""
+    global _last_send_time
+    with _send_lock:
+        elapsed = time.monotonic() - _last_send_time
+        if elapsed < RATE_LIMIT_INTERVAL:
+            time.sleep(RATE_LIMIT_INTERVAL - elapsed)
+        _last_send_time = time.monotonic()
+
+    content = json.dumps(card, ensure_ascii=False)
+    for attempt in range(max_retries):
+        req = CreateMessageRequest.builder() \
+            .receive_id_type("chat_id") \
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("interactive")
+                .content(content)
+                .build()
+            ).build()
+        resp = _client.im.v1.message.create(req)
+        if resp.success():
+            metrics.inc("cards_sent")
+            return
+        if resp.code == 429:
+            time.sleep(2 ** attempt)
+            continue
+        log.error("Feishu send_card failed: code=%s msg=%s", resp.code, resp.msg)
+        return
+    log.error("Feishu send_card failed after %d retries for chat_id=%s", max_retries, chat_id)
+
+
 def _send_one(chat_id: str, text: str, max_retries: int = 3) -> None:
     global _last_send_time
 

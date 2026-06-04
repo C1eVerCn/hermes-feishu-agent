@@ -14,6 +14,7 @@ from infra.metrics import metrics
 from ocl.pipeline import apply as ocl_apply
 from ocl.tool_guard import set_current_user, set_current_email
 from ocl import identity
+from ocl import tool_capture
 
 log = logging.getLogger(__name__)
 
@@ -150,13 +151,17 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         return
 
     # ── Agent call ──────────────────────────────────────────────────────────
+    session_id = f"feishu_{user_id}"  # must match agent_pool's session_id
     start = time.monotonic()
+    captured: list[dict] = []
     try:
         agent = agent_pool.get_or_create(user_id)
         set_current_user(user_id)
         set_current_email(email)
+        tool_capture.clear(session_id)
         future = _executor.submit(agent.chat, text)
         response: str = future.result(timeout=settings.AGENT_TIMEOUT_SECONDS)
+        captured = tool_capture.read(session_id)
         latency = time.monotonic() - start
         metrics.record("llm_latency_seconds", latency)
         metrics.inc("messages_processed")
@@ -172,14 +177,21 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     finally:
         set_current_user("")
         set_current_email("")
+        tool_capture.clear(session_id)
 
     # ── OCL pipeline ────────────────────────────────────────────────────────
-    ocl_result = ocl_apply(response or "", user_id)
+    ocl_result = ocl_apply(response or "", user_id, captured=captured)
     if ocl_result.blocked:
         metrics.inc("errors_ocl_blocked")
-    response = ocl_result.text or _ERROR_REPLY
 
-    sender.send(chat_id, response)
+    if ocl_result.card is not None and not ocl_result.blocked:
+        try:
+            sender.send_card(chat_id, ocl_result.card)
+        except Exception:
+            log.exception("send_card failed, falling back to text")
+            sender.send(chat_id, ocl_result.text or _ERROR_REPLY)
+    else:
+        sender.send(chat_id, ocl_result.text or _ERROR_REPLY)
 
 
 def _match_simple_intent(text: str) -> str:

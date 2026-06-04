@@ -78,3 +78,26 @@ def test_content_block_has_higher_priority_than_length():
         result = pipeline.apply(long_blocked, "ou_user")
     assert result.blocked
     assert "[...内容已截断" not in result.text  # truncation never ran
+
+
+# ── B5: interactive card ─────────────────────────────────────────────────────
+
+def test_apply_returns_card_with_captured():
+    captured = [{"tool": "list_my_reservations", "result": {"code": 200, "data": [
+        {"benchNo": "TJ001", "startTime": "2099-01-01 09:00:00", "endTime": "2099-01-01 10:00:00",
+         "taskName": "t", "status": 0, "statusDesc": "待审批"}]}}]
+    res = pipeline.apply("您有1条预约", "ou_x", captured=captured)
+    assert res.card is not None
+    assert any(e.get("tag") == "action" for e in res.card["elements"])
+
+
+def test_apply_blocked_has_no_card():
+    res = pipeline.apply("", "ou_x", captured=[])
+    assert res.blocked is True
+    assert res.card is None
+
+
+def test_apply_plain_text_still_builds_card_without_action():
+    res = pipeline.apply("**你好**", "ou_x", captured=[])
+    assert res.card is not None
+    assert all(e.get("tag") != "action" for e in res.card["elements"])

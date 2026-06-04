@@ -32,3 +32,26 @@ def test_send_adds_chunk_labels_for_long_text():
 
     assert sent_texts[0].startswith("[1/")
     assert sent_texts[1].startswith("[2/")
+
+
+# ── B6: interactive card ─────────────────────────────────────────────────────
+
+def test_send_card_builds_interactive_payload():
+    import json
+    import feishu.sender as sender
+    card = {"config": {"wide_screen_mode": True}, "elements": [{"tag": "div"}]}
+    fake_resp = MagicMock()
+    fake_resp.success.return_value = True
+    captured = {}
+
+    def fake_create(req):
+        captured["req"] = req
+        return fake_resp
+
+    with patch.object(sender._client.im.v1.message, "create", side_effect=fake_create), \
+         patch("time.sleep"):
+        sender.send_card("oc_chat", card)
+
+    body = captured["req"].request_body
+    assert body.msg_type == "interactive"
+    assert json.loads(body.content)["elements"][0]["tag"] == "div"

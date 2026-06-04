@@ -6,7 +6,7 @@ Fail-open on unexpected exceptions (log + pass through).
 import logging
 from dataclasses import dataclass, field
 
-from ocl import format_control, content_filter, length_limiter
+from ocl import format_control, content_filter, length_limiter, card_builder
 from config.settings import settings
 
 log = logging.getLogger(__name__)
@@ -20,28 +20,37 @@ class OclResult:
     text: str
     blocked: bool
     block_reason: str = ""
+    card: dict | None = None
 
 
-def apply(response: str, user_id: str) -> OclResult:
-    """Run OCL pipeline on the LLM response. Never raises."""
+def apply(response: str, user_id: str, captured: list[dict] | None = None) -> OclResult:
+    """Run OCL pipeline on the LLM response. Never raises.
+
+    captured: this turn's raw tool results (from ocl.tool_capture) used to build
+    a deterministic interactive card. Empty/None → card is summary-only.
+    """
+    captured = captured or []
     try:
         # 1. Format control
         fmt = format_control.apply(response)
         if fmt.blocked:
-            return OclResult(text=_EMPTY_MESSAGE, blocked=True, block_reason=fmt.block_reason)
+            return OclResult(text=_EMPTY_MESSAGE, blocked=True, block_reason=fmt.block_reason, card=None)
         text = fmt.text
 
         # 2. Content boundary
         content = content_filter.check(text)
         if content.blocked:
             block_msg = getattr(settings, "OCL_CONTENT_BLOCK_MESSAGE", _BLOCK_MESSAGE)
-            return OclResult(text=block_msg, blocked=True, block_reason=content.reason)
+            return OclResult(text=block_msg, blocked=True, block_reason=content.reason, card=None)
 
         # 3. Length limit
         text = length_limiter.apply(text)
 
-        return OclResult(text=text, blocked=False)
+        # 4. Interactive card (deterministic data from captured tool results)
+        card = card_builder.build_card(text, captured)
+
+        return OclResult(text=text, blocked=False, card=card)
 
     except Exception:
         log.exception("ocl_pipeline_error user_id=%s — failing open", user_id)
-        return OclResult(text=response, blocked=False, block_reason="")
+        return OclResult(text=response, blocked=False, block_reason="", card=None)
