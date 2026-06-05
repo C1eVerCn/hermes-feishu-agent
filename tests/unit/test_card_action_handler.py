@@ -31,12 +31,14 @@ def test_cancel_calls_handler_and_returns_toast():
         m.assert_called_once()
 
 
-def test_approve_denied_for_normal_user_via_ocl():
-    with patch.object(cah.handlers, "approve_reservation") as m:
+def test_approve_by_normal_user_reaches_api_which_rejects():
+    # OCL no longer gates by role; the real API enforces and returns its own error
+    with patch.object(cah.handlers, "approve_reservation",
+                      return_value='{"error":"HTTP 400: 您没有权限审批该台架的预约"}') as m:
         toast, card = cah.handle("ou_user", {"action": "approve", "benchNo": "TJ001",
                                              "approvalResult": 1})
         assert "权限" in toast
-        m.assert_not_called()
+        m.assert_called_once()
 
 
 def test_approve_allowed_for_scheduler():

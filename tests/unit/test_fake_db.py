@@ -1,12 +1,16 @@
-"""Unit tests for mock_api/fake_db.py seed data + data access."""
+"""Unit tests for mock_api/fake_db.py seed data + data access.
+These exercise the MOCK backend's demo data, so they enable MOCK_SEED."""
 import pytest
 from mock_api import fake_db
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    monkeypatch.setenv("MOCK_SEED", "1")
     fake_db.reset()
     yield
+    monkeypatch.delenv("MOCK_SEED", raising=False)
+    fake_db.reset()
 
 
 def test_five_architectures():

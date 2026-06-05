@@ -9,9 +9,12 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    monkeypatch.setenv("MOCK_SEED", "1")
     fake_db.reset()
     yield
+    monkeypatch.delenv("MOCK_SEED", raising=False)
+    fake_db.reset()
 
 
 def test_architectures():

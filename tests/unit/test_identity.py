@@ -38,11 +38,11 @@ def test_role_from_override_file():
     assert identity.role_of("ou_sched") == 2
 
 
-def test_role_from_fake_db_via_feishu_api(monkeypatch):
-    # Simulate Feishu API returning zhang's email, which exists in fake_db as role 1
+def test_role_zero_without_override(monkeypatch):
+    # role_of no longer consults fake_db; only overrides count
     monkeypatch.setattr(identity, "_resolve_open_id",
                         lambda oid: ("zhangsan@example.com", "张三"))
-    assert identity.role_of("ou_unknown") == 1  # resolved from fake_db
+    assert identity.role_of("ou_unknown") == 0
 
 
 def test_role_zero_for_unknown_user(monkeypatch):
@@ -77,7 +77,7 @@ def test_lookup_returns_dict(monkeypatch):
     info = identity.lookup("ou_x")
     assert info["email"] == "zhangsan@example.com"
     assert info["name"] == "张三"
-    assert info["role"] == 1
+    assert info["role"] == 0  # no override → 0 (real API decides perms)
 
 
 def test_set_role_persists():

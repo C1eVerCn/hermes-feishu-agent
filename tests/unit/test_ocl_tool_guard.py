@@ -53,14 +53,20 @@ def test_guarded_handler_passes_when_permitted():
     assert len(calls) == 1
 
 
-def test_guarded_handler_blocks_when_no_permission():
+def test_guarded_handler_blocks_unknown_tool():
     guard.set_current_user("ou_alice")
     inner = lambda args: "should not run"
-    wrapped = guard.guarded("approve_reservation", inner)  # role 1 cannot approve
+    wrapped = guard.guarded("drop_database", inner)  # unknown tool → blocked
     result = wrapped({})
     data = json.loads(result)
     assert "error" in data
     assert result != "should not run"
+
+
+def test_guarded_allows_known_tool():
+    guard.set_current_user("ou_alice")
+    wrapped = guard.guarded("approve_reservation", lambda args: "ok")  # known → allowed (API gates)
+    assert wrapped({}) == "ok"
 
 
 def test_guarded_tolerates_extra_kwargs():

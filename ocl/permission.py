@@ -1,6 +1,9 @@
-"""Role-based tool ACL for the test-bench reservation bot.
-Each tool declares a minimum role; a user's role comes from ocl.identity.
-Coarse gate only — fine-grained rules (same-group, status) live in the mock API.
+"""Tool ACL for the test-bench reservation bot.
+
+Permissions are enforced server-side by the real RESTful API (by emailAddress),
+so the local gate only verifies the tool is a known/registered one. Roles are no
+longer checked here; the handler's identity gate (resolvable Feishu email) is what
+distinguishes platform users from outsiders.
 """
 import logging
 
@@ -8,7 +11,9 @@ from ocl import identity
 
 log = logging.getLogger(__name__)
 
-# tool → minimum role required (1 普通, 2 调度员)
+# Registered tools. Membership = the tool is allowed to dispatch; the real API
+# decides whether THIS user may perform it. TOOL_MIN_ROLE is kept as the registry
+# of known tools (values are advisory only, retained for reference/overrides).
 TOOL_MIN_ROLE: dict[str, int] = {
     "list_architectures":     1,
     "list_available_benches": 1,
@@ -22,8 +27,5 @@ TOOL_MIN_ROLE: dict[str, int] = {
 
 
 def is_tool_permitted(open_id: str, tool_name: str) -> bool:
-    min_role = TOOL_MIN_ROLE.get(tool_name)
-    if min_role is None:
-        return False  # unknown tool — deny
-    role = identity.role_of(open_id)
-    return role >= min_role
+    """Allow any known tool; deny unknown tools. Real API enforces per-user rights."""
+    return tool_name in TOOL_MIN_ROLE

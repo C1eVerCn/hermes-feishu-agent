@@ -31,10 +31,19 @@ def _make_handler():
 
 # ── Identity query ───────────────────────────────────────────────────────────
 
-def test_my_permission_reports_role():
+def test_my_permission_reports_platform_user(monkeypatch):
     handler = _make_handler()
-    assert "调度员" in handler._handle_identity_query("我的权限", "ou_sched")
-    assert "普通用户" in handler._handle_identity_query("我的权限", "ou_user")
+    monkeypatch.setattr(handler.identity, "email_of", lambda oid: "zhangsan@example.com")
+    out = handler._handle_identity_query("我的权限", "ou_user")
+    assert "平台用户" in out
+    assert "zhangsan@example.com" in out
+
+
+def test_my_permission_non_platform(monkeypatch):
+    handler = _make_handler()
+    monkeypatch.setattr(handler.identity, "email_of", lambda oid: "")
+    out = handler._handle_identity_query("我的权限", "ou_ghost")
+    assert "还不是平台用户" in out
 
 
 def test_identity_query_empty_for_other_text():

@@ -1,11 +1,16 @@
-"""In-memory seed data + data access for the test-bench reservation domain.
+"""In-memory data layer for the test-bench reservation domain.
 Pure data layer — no HTTP. Routes call these and wrap into {code,message,data}.
+
+Mock seed data is DISABLED by default (cleared) — the bot is meant to point at a
+real RESTful API via MOCK_API_BASE_URL. Set env MOCK_SEED=1 to load demo data for
+local testing.
 """
+import os
 import uuid
 
 from mock_api.state_machine import can_transition, STATUS_DESC
 
-ARCHITECTURES = ["1.0架构", "1.5架构", "3.0架构", "L3架构", "L4架构"]
+ARCHITECTURES: list[str] = []
 
 # email → user
 users: dict[str, dict] = {}
@@ -22,7 +27,15 @@ def new_id() -> str:
 
 
 def _seed() -> None:
+    """Clear all in-memory data. Demo data only loads when MOCK_SEED=1."""
+    ARCHITECTURES.clear()
     users.clear(); groups.clear(); benches.clear(); reservations.clear()
+    if os.getenv("MOCK_SEED", "") == "1":
+        _seed_demo()
+
+
+def _seed_demo() -> None:
+    ARCHITECTURES.extend(["1.0架构", "1.5架构", "3.0架构", "L3架构", "L4架构"])
 
     # ── groups + schedulers ──────────────────────────────────────────────
     for i in range(1, 6):

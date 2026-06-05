@@ -1,6 +1,7 @@
 """open_id → {email, name} resolution via Feishu Contact API + in-memory cache.
-Role overrides from data/identity_map.json (open_id → role int).
-When no override exists, role is resolved from mock_api.fake_db by email.
+Role overrides from data/identity_map.json (open_id → role int) — used only when
+an admin explicitly assigns a role. With a real backend, per-user permissions are
+enforced server-side by emailAddress, so role is not gated locally.
 
 Prior art: the previous version required mapping EVERY user's open_id→email
 manually in identity_map.json. Now email/name come from the Feishu API
@@ -132,31 +133,16 @@ def name_of(open_id: str) -> str:
 
 
 def role_of(open_id: str) -> int:
-    """Return the user's role: 0 unknown, 1 普通, 2 调度员, 3 管理员.
+    """Return the user's role override: 0 unknown, 1 普通, 2 调度员, 3 管理员.
 
-    Resolution order:
-      1. identity_map.json override (open_id → role)
-      2. Look up user in mock_api.fake_db by the email resolved from open_id
-      3. 0 (non-platform)
+    With a real backend, permissions are enforced server-side by emailAddress,
+    so this only reflects admin-assigned overrides in identity_map.json. Returns
+    0 when no override exists (the bot does not gate by role locally).
     """
     if not open_id:
         return 0
-
-    # 1. file override (admin-assigned)
     overrides = _load_role_overrides()
-    if open_id in overrides:
-        return overrides[open_id]
-
-    # 2. resolve email via Feishu API → look up in fake_db
-    email = email_of(open_id)
-    if not email:
-        return 0
-
-    from mock_api.fake_db import get_user
-    user = get_user(email)
-    if user is not None:
-        return user.get("role", 0)
-    return 0
+    return overrides.get(open_id, 0)
 
 
 def lookup(open_id: str) -> dict | None:

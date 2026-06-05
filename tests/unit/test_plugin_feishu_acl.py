@@ -35,14 +35,22 @@ def test_hook_allows_permitted_tool_for_role1_user():
     assert hook(tool_name="list_my_reservations", session_id="feishu_ou_alice") is None
 
 
-def test_hook_blocks_approve_for_role1_user():
+def test_hook_blocks_unknown_tool():
     from ocl.session_map import register
     register("feishu_ou_alice", "ou_alice")
     hook = _load_hook()
-    result = hook(tool_name="approve_reservation", session_id="feishu_ou_alice")
+    result = hook(tool_name="drop_database", session_id="feishu_ou_alice")
     assert result is not None
     assert result["action"] == "block"
     assert "权限不足" in result["message"]
+
+
+def test_hook_allows_approve_known_tool():
+    # role gating removed; the real API decides — plugin only blocks unknown tools
+    from ocl.session_map import register
+    register("feishu_ou_alice", "ou_alice")
+    hook = _load_hook()
+    assert hook(tool_name="approve_reservation", session_id="feishu_ou_alice") is None
 
 
 def test_hook_passes_when_no_session_id():

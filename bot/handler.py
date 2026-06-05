@@ -73,11 +73,12 @@ def _is_admin(user_id: str) -> bool:
 
 def _handle_identity_query(text: str, user_id: str) -> str:
     if _MY_PERMS.search(text):
-        role = identity.role_of(user_id)
-        return (f"您当前的角色：{_ROLE_NAME.get(role, '未知')}。\n"
-                "• 普通用户：查询/预约/取消/归还台架\n"
-                "• 调度员：额外可审批本组预约\n"
-                "• 管理员：可预约/审批所有台架")
+        email = identity.email_of(user_id)
+        if not email:
+            return "您还不是平台用户，请联系管理员开通。"
+        return (f"您是平台用户（账号：{email}）。\n"
+                "您可查询台架架构/可用台架、预约/取消/归还台架、查询我的预约；\n"
+                "审批等操作的权限由台架系统按您的账号实时判定。")
     return ""
 
 
