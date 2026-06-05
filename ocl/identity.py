@@ -1,62 +1,187 @@
-"""open_id ↔ {email, name, role} mapping for the Feishu test-bench bot.
-Role: 0 = unknown/non-platform, 1 = 普通用户, 2 = 调度员, 3 = 管理员.
-JSON-file persistence (data/identity_map.json), cached with simple invalidation.
+"""open_id → {email, name} resolution via Feishu Contact API + in-memory cache.
+Role overrides from data/identity_map.json (open_id → role int).
+When no override exists, role is resolved from mock_api.fake_db by email.
+
+Prior art: the previous version required mapping EVERY user's open_id→email
+manually in identity_map.json. Now email/name come from the Feishu API
+automatically, and the file only stores admin-assigned role overrides.
 """
 import json
 import os
 import threading
+import logging
+
+import lark_oapi as lark
+from lark_oapi.api.contact.v3 import GetUserRequest
+
+from config.settings import settings
+
+log = logging.getLogger(__name__)
 
 _MAP_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "identity_map.json")
 _lock = threading.Lock()
-_cache: dict | None = None
+
+# ── in-memory caches (open_id → str) ─────────────────────────────────────
+_email_cache: dict[str, str] = {}
+_name_cache: dict[str, str] = {}
+# negative cache: open_ids we already tried to resolve but got nothing back
+_miss_cache: set[str] = set()
+
+# ── role overrides from identity_map.json ─────────────────────────────────
+_role_overrides: dict[str, int] = {}
+_role_overrides_loaded: bool = False
+
+# ── lazily-initialised Feishu client ──────────────────────────────────────
+_client: lark.Client | None = None
 
 
-def _invalidate_cache() -> None:
-    global _cache
-    _cache = None
+def _get_client() -> lark.Client:
+    global _client
+    if _client is None:
+        _client = (
+            lark.Client.builder()
+            .app_id(settings.FEISHU_APP_ID)
+            .app_secret(settings.FEISHU_APP_SECRET)
+            .build()
+        )
+    return _client
 
 
-def _load() -> dict:
-    global _cache
-    if _cache is not None:
-        return _cache
+def _load_role_overrides() -> dict[str, int]:
+    global _role_overrides_loaded
+    if _role_overrides_loaded:
+        return _role_overrides
     try:
         with open(_MAP_FILE, "r", encoding="utf-8") as f:
-            _cache = json.load(f)
+            data = json.load(f)
+        if isinstance(data, dict):
+            # accept both new format {open_id: 3} and old format {open_id: {role: 3, ...}}
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    _role_overrides[k] = v.get("role", 0)
+                elif isinstance(v, int):
+                    _role_overrides[k] = v
     except Exception:
-        _cache = {}
-    return _cache
+        pass
+    _role_overrides_loaded = True
+    return _role_overrides
 
 
-def _save(data: dict) -> None:
-    os.makedirs(os.path.dirname(_MAP_FILE), exist_ok=True)
-    with open(_MAP_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    _invalidate_cache()
+def _invalidate_role_overrides() -> None:
+    global _role_overrides_loaded
+    _role_overrides.clear()
+    _role_overrides_loaded = False
 
 
-def lookup(open_id: str) -> dict | None:
-    with _lock:
-        return _load().get(open_id)
+def _resolve_open_id(open_id: str) -> tuple[str, str]:
+    """Call Feishu Contact API. Returns (email, name) or ('', '')."""
+    try:
+        client = _get_client()
+        req = (
+            GetUserRequest.builder()
+            .user_id(open_id)
+            .user_id_type("open_id")
+            .build()
+        )
+        resp = client.contact.v3.user.get(req)
+        if resp.success() and resp.data and resp.data.user:
+            u = resp.data.user
+            email = getattr(u, "email", "") or ""
+            name = getattr(u, "name", "") or ""
+            log.info("feishu_user_resolved open_id=%s email=%s name=%s", open_id, email, name)
+            return email, name
+        log.warning("feishu_user_resolve_failed open_id=%s code=%s msg=%s", open_id, resp.code, resp.msg)
+    except Exception:
+        log.exception("feishu_user_resolve_error open_id=%s", open_id)
+    return "", ""
 
+
+# ── public API ──────────────────────────────────────────────────────────────
 
 def email_of(open_id: str) -> str:
-    info = lookup(open_id)
-    return info["email"] if info else ""
-
-
-def role_of(open_id: str) -> int:
-    info = lookup(open_id)
-    return info["role"] if info else 0
+    if not open_id:
+        return ""
+    with _lock:
+        if open_id in _email_cache:
+            return _email_cache[open_id]
+        if open_id in _miss_cache:
+            return ""
+        # unlock while calling external API
+    email, name = _resolve_open_id(open_id)
+    with _lock:
+        if email:
+            _email_cache[open_id] = email
+            _name_cache[open_id] = name
+            return email
+        _miss_cache.add(open_id)
+        return ""
 
 
 def name_of(open_id: str) -> str:
-    info = lookup(open_id)
-    return info["name"] if info else ""
-
-
-def set_role(open_id: str, email: str, name: str, role: int) -> None:
+    if not open_id:
+        return ""
     with _lock:
-        data = dict(_load())
-        data[open_id] = {"email": email, "name": name, "role": role}
-        _save(data)
+        if open_id in _name_cache:
+            return _name_cache[open_id]
+    # trigger resolution via email_of (which populates both caches)
+    email = email_of(open_id)
+    if not email:
+        return ""
+    with _lock:
+        return _name_cache.get(open_id, "")
+
+
+def role_of(open_id: str) -> int:
+    """Return the user's role: 0 unknown, 1 普通, 2 调度员, 3 管理员.
+
+    Resolution order:
+      1. identity_map.json override (open_id → role)
+      2. Look up user in mock_api.fake_db by the email resolved from open_id
+      3. 0 (non-platform)
+    """
+    if not open_id:
+        return 0
+
+    # 1. file override (admin-assigned)
+    overrides = _load_role_overrides()
+    if open_id in overrides:
+        return overrides[open_id]
+
+    # 2. resolve email via Feishu API → look up in fake_db
+    email = email_of(open_id)
+    if not email:
+        return 0
+
+    from mock_api.fake_db import get_user
+    user = get_user(email)
+    if user is not None:
+        return user.get("role", 0)
+    return 0
+
+
+def lookup(open_id: str) -> dict | None:
+    """Return {email, name, role} or None. Kept for backward compat."""
+    if not open_id:
+        return None
+    email = email_of(open_id)
+    if not email:
+        return None
+    return {
+        "email": email,
+        "name": name_of(open_id),
+        "role": role_of(open_id),
+    }
+
+
+def set_role(open_id: str, role: int) -> None:
+    """Write a role override for open_id. Email/name come from the API."""
+    if not open_id:
+        return
+    with _lock:
+        _load_role_overrides()
+        _role_overrides[open_id] = role
+        overrides = dict(_role_overrides)
+    os.makedirs(os.path.dirname(_MAP_FILE), exist_ok=True)
+    with open(_MAP_FILE, "w", encoding="utf-8") as f:
+        json.dump(overrides, f, ensure_ascii=False, indent=2)
+    log.info("role_override_set open_id=%s role=%d", open_id, role)

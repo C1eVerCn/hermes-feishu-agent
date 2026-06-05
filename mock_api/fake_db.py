@@ -44,7 +44,7 @@ def _seed() -> None:
         users[email] = {"email": email, "name": f"调度员{i}", "role": 2, "group_id": f"G{i}"}
     # 管理员（role=3）
     users["admin@example.com"] = {"email": "admin@example.com", "name": "王五", "role": 3, "group_id": "G1"}
-    users["chenyihang@immotors.com"] = {"email": "chenyihang@immotors.com", "name": "陈逸航", "role": 3, "group_id": "G1"}
+    users["chenyihang@immotors.com"] = {"email": "chenyihang@immotors.com", "name": "谌一航", "role": 3, "group_id": "G1"}
 
     # ── 30 benches ───────────────────────────────────────────────────────
     for n in range(1, 31):

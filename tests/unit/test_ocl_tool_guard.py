@@ -14,12 +14,11 @@ import ocl.tool_guard as guard
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
     f = tmp_path / "identity_map.json"
-    f.write_text(json.dumps({
-        # role 1 → can use reserve_bench / list_my_reservations, not approve
-        "ou_alice": {"email": "zhangsan@example.com", "name": "张三", "role": 1},
-    }, ensure_ascii=False))
+    # role 1 → can use reserve_bench / list_my_reservations, not approve
+    f.write_text(json.dumps({"ou_alice": 1}, ensure_ascii=False))
     monkeypatch.setattr(identity, "_MAP_FILE", str(f))
-    identity._invalidate_cache()
+    identity._invalidate_role_overrides()
+    monkeypatch.setattr(identity, "_resolve_open_id", lambda oid: ("", ""))
     guard.set_current_user("")   # reset between tests
     guard.set_current_email("")
     yield

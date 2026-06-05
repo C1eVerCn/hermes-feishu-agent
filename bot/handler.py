@@ -24,7 +24,7 @@ _EMPTY_REPLY = "您好，请输入文字消息，我来为您解答。"
 _TIMEOUT_REPLY = "抱歉，响应超时（>120s），请稍后重试。"
 _ERROR_REPLY = "抱歉，处理您的消息时出现了错误，请稍后再试。"
 _INPUT_TOO_LONG_REPLY = "抱歉，消息过长（超过 8000 字），请分段发送。"
-_NON_PLATFORM_REPLY_TEMPLATE = "您还不是平台用户（您的 open_id: {open_id}），请联系管理员将您添加至 identity_map.json。"
+_NON_PLATFORM_REPLY_TEMPLATE = "您还不是平台用户（您的 open_id: {open_id}），请联系管理员开通。管理员可在飞书发「设置角色 {open_id} 1|2|3」设置您的权限。"
 _MAX_INPUT_CHARS = 8000
 
 # ── Layer 0: Instant replies for simple intents (no agent, <1ms) ──────────
@@ -87,10 +87,7 @@ def _handle_admin_command(text: str, user_id: str) -> str:
     m = _ADMIN_SET_ROLE.match(text)
     if m:
         target, role = m.group(1), int(m.group(2))
-        existing = identity.lookup(target)
-        email = existing["email"] if existing else f"{target}@placeholder.local"
-        name = existing["name"] if existing else target
-        identity.set_role(target, email, name, role)
+        identity.set_role(target, role)
         return f"已设置 {target} 的角色为 {_ROLE_NAME[role]}。"
     return ""
 

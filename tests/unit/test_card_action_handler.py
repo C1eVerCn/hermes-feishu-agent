@@ -10,11 +10,14 @@ import ocl.identity as identity
 def _ident(tmp_path, monkeypatch):
     f = tmp_path / "identity_map.json"
     f.write_text(json.dumps({
-        "ou_user":  {"email": "zhangsan@example.com", "name": "张三", "role": 1},
-        "ou_sched": {"email": "scheduler1@example.com", "name": "调度员1", "role": 2},
+        "ou_user":  1,
+        "ou_sched": 2,
     }, ensure_ascii=False))
     monkeypatch.setattr(identity, "_MAP_FILE", str(f))
-    identity._invalidate_cache()
+    identity._invalidate_role_overrides()
+    _emails = {"ou_user": ("zhangsan@example.com", "张三"),
+               "ou_sched": ("scheduler1@example.com", "调度员1")}
+    monkeypatch.setattr(identity, "_resolve_open_id", lambda oid: _emails.get(oid, ("", "")))
     yield
 
 

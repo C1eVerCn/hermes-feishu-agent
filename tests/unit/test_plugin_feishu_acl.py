@@ -13,10 +13,11 @@ def _fresh_state(tmp_path, monkeypatch):
     f = tmp_path / "identity_map.json"
     f.write_text(json.dumps({
         # ou_alice → role 1: may use list/reserve tools, not approve
-        "ou_alice": {"email": "zhangsan@example.com", "name": "张三", "role": 1},
+        "ou_alice": 1,
     }, ensure_ascii=False))
     monkeypatch.setattr(identity, "_MAP_FILE", str(f))
-    identity._invalidate_cache()
+    identity._invalidate_role_overrides()
+    monkeypatch.setattr(identity, "_resolve_open_id", lambda oid: ("", ""))
     import ocl.session_map as sm
     monkeypatch.setattr(sm, "_map", {})
 

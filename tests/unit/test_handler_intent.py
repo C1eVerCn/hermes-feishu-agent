@@ -13,12 +13,13 @@ def _env(monkeypatch, tmp_path):
     import ocl.identity as identity
     f = tmp_path / "identity_map.json"
     f.write_text(json.dumps({
-        "ou_user":  {"email": "zhangsan@example.com", "name": "张三", "role": 1},
-        "ou_sched": {"email": "scheduler1@example.com", "name": "调度员1", "role": 2},
-        "ou_admin": {"email": "admin@example.com", "name": "王五", "role": 3},
+        "ou_user":  1,
+        "ou_sched": 2,
+        "ou_admin": 3,
     }, ensure_ascii=False))
     monkeypatch.setattr(identity, "_MAP_FILE", str(f))
-    identity._invalidate_cache()
+    identity._invalidate_role_overrides()
+    monkeypatch.setattr(identity, "_resolve_open_id", lambda oid: ("", ""))
 
 
 def _make_handler():
