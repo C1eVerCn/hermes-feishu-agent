@@ -7,11 +7,11 @@ import logging
 
 from ocl import identity, permission
 from ocl.tool_guard import set_current_email, set_current_user
-from mock_tools import handlers
+from bench_tools import handlers
 
 log = logging.getLogger(__name__)
 
-# action → tool registry name (handler resolved by the same name at call time)
+# action → tool注册名（handler 按同名在调用时解析）
 _ACTION_TOOL = {
     "cancel":  "cancel_reservation",
     "approve": "approve_reservation",

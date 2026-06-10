@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
@@ -14,6 +15,7 @@ from infra.metrics import metrics
 from ocl.pipeline import apply as ocl_apply
 from ocl.tool_guard import set_current_user, set_current_email
 from ocl import identity
+from bot.identity_admin import get_admin as get_identity_admin
 from ocl import tool_capture
 
 log = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ _MAX_INPUT_CHARS = 8000
 _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
     # Greetings
     (re.compile(r'^(你好|hi|hello|hey|嗨|哈[啰咯]|早上好|下午好|晚上好|good\s*morning|good\s*afternoon|good\s*evening)[\s!！。.]*$', re.IGNORECASE),
-     "你好！我是台架预约助手，可以帮您查询架构与可用台架、预约/取消/归还台架，调度员还能审批预约。\n输入「帮助」了解我能做什么。"),
+     "你好！我是 DMZ智能体助手，可以帮你处理台架预约和 VLM精标数据查询。\n输入「帮助」了解我能做什么。"),
     # Gratitude
     (re.compile(r'^(谢谢|感谢|thanks|thank\s*you|3q|多谢|谢了|辛苦)[\s!！。.]*$', re.IGNORECASE),
      "不客气！有需要随时找我。"),
@@ -53,7 +55,7 @@ _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
      "好的，有问题随时找我。"),
 ]
 
-# ── Identity / admin intent patterns ────────────────────────────────────────
+# ──身份 /管理员意图正则 ────────────────────────────────
 
 _MY_PERMS = re.compile(r'我的权限|查看.*权限|我的角色')
 # Admin command: "设置角色 ou_xxx 2"
@@ -74,11 +76,22 @@ def _is_admin(user_id: str) -> bool:
 def _handle_identity_query(text: str, user_id: str) -> str:
     if _MY_PERMS.search(text):
         email = identity.email_of(user_id)
-        if not email:
-            return "您还不是平台用户，请联系管理员开通。"
-        return (f"您是平台用户（账号：{email}）。\n"
-                "您可查询台架架构/可用台架、预约/取消/归还台架、查询我的预约；\n"
-                "审批等操作的权限由台架系统按您的账号实时判定。")
+        name = identity.name_of(user_id) or "(未识别)"
+        admin = get_identity_admin()
+        role = admin.get_role(user_id)
+        if role == 0:
+            return (f"您当前是【待审核】用户。\n"
+                    f"open_id: {user_id}\n"
+                    f"邮箱: {email or '(飞书未返回)'}\n"
+                    f"姓名: {name}\n\n"
+                    f"请联系管理员在飞书发「设置角色 {user_id} 1|2|3」开通权限。")
+        role_name = {1: "普通用户", 2: "调度员", 3: "管理员"}.get(role, "未知")
+        return (f"您是平台【{role_name}】（role={role}）。\n"
+                f"open_id: {user_id}\n"
+                f"邮箱: {email or '(飞书未返回)'}\n"
+                f"姓名: {name}\n\n"
+                f"可查询台架/VLM 数据、预约/取消/归还台架；"
+                f"调度员/管理员额外可审批预约、触发 VLM 同步。")
     return ""
 
 
@@ -88,13 +101,16 @@ def _handle_admin_command(text: str, user_id: str) -> str:
     m = _ADMIN_SET_ROLE.match(text)
     if m:
         target, role = m.group(1), int(m.group(2))
-        identity.set_role(target, role)
+        admin = get_identity_admin()
+        ok, msg = admin.set_role(target, role, operator=user_id, note="via_feishu_admin_command")
+        if not ok:
+            return f"设置失败：{msg}"
         return f"已设置 {target} 的角色为 {_ROLE_NAME[role]}。"
     return ""
 
 
 def start_consumer() -> None:
-    """Blocking consumer loop. Run in a dedicated thread."""
+    """阻塞的消费循环。运行在专用线程。"""
     log.info("Event consumer started")
     while True:
         data: P2ImMessageReceiveV1 = event_queue.get()
@@ -125,6 +141,25 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         sender.send(chat_id, _INPUT_TOO_LONG_REPLY)
         return
 
+    # ──身份闸（最早期）：先 resolve role，让所有路径看到一致的角色 ─
+    # 简化模型：「飞书能拿到 email → 默认 role=1」；admin 显式覆盖永远胜出
+    # （auto_register 幂等不会改已有 admin 设置；set_role 只在 role==0 时升级）。
+    admin = get_identity_admin()
+    email = identity.email_of(user_id)
+    name = identity.name_of(user_id)
+    if email:
+        admin.auto_register(user_id, email=email, name=name)
+        if admin.get_role(user_id) == 0:
+            admin.set_role(
+                user_id, 1,
+                operator="auto_email_verified",
+                note=f"feishu returned email {email}",
+            )
+    role = admin.get_role(user_id)
+    if admin.get(user_id):
+        email = admin.get(user_id).get("email", "") or email
+        name = admin.get(user_id).get("name", "") or name
+
     # ── Layer 0: Simple intent — instant reply, no agent ──────────────────
     instant = _match_simple_intent(text)
     if instant:
@@ -142,22 +177,29 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         sender.send(chat_id, admin_response)
         return
 
-    # ── Identity gate: resolve email; non-platform users cannot use the agent ─
-    email = identity.email_of(user_id)
-    if not email:
-        sender.send(chat_id, _NON_PLATFORM_REPLY_TEMPLATE.format(open_id=user_id))
+    # ── 身份闸：role=0 才拒绝进入 agent（resolve 已在 _handle 入口完成） ─
+    if role == 0:
+        sender.send(chat_id,
+            f"您还不是平台用户（您的 open_id: {user_id}）。\n"
+            "可能原因：飞书 Contact API 未返回您的邮箱（隐私设置或 app 权限不足）。\n"
+            "请联系管理员手动开通，或在飞书开发者后台确认机器人有「获取用户邮箱」权限。"
+        )
         return
 
     # ── Agent call ──────────────────────────────────────────────────────────
-    session_id = f"feishu_{user_id}"  # must match agent_pool's session_id
+    session_id = f"feishu_{user_id}"  # 必须与 agent_pool 的 session_id 一致
     start = time.monotonic()
     captured: list[dict] = []
     try:
         agent = agent_pool.get_or_create(user_id)
         set_current_user(user_id)
         set_current_email(email)
+        # 关键：contextvars 不会跨线程自动传播——必须在提交任务前 copy_context，
+        # 再让 worker 在副本 context 里跑 agent.chat()，否则 worker 里
+        # get_current_email() 拿到空串，POST body 缺 emailAddress。
+        ctx = contextvars.copy_context()
         tool_capture.clear(session_id)
-        future = _executor.submit(agent.chat, text)
+        future = _executor.submit(ctx.run, agent.chat, text)
         response: str = future.result(timeout=settings.AGENT_TIMEOUT_SECONDS)
         captured = tool_capture.read(session_id)
         latency = time.monotonic() - start
@@ -177,7 +219,7 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         set_current_email("")
         tool_capture.clear(session_id)
 
-    # ── OCL pipeline ────────────────────────────────────────────────────────
+    # ──OCL流水线 ─────────────────────────────────────────────
     ocl_result = ocl_apply(response or "", user_id, captured=captured)
     if ocl_result.blocked:
         metrics.inc("errors_ocl_blocked")
@@ -193,7 +235,7 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
 
 
 def _match_simple_intent(text: str) -> str:
-    """Match text against simple-intent patterns. Returns reply string or ''."""
+    """把文本与简单意图正则匹配。命中则返回回复字符串，否则返回 ''。"""
     for pattern, reply in _SIMPLE_REPLIES:
         if pattern.search(text):
             return reply
@@ -201,7 +243,7 @@ def _match_simple_intent(text: str) -> str:
 
 
 def _extract_text(msg) -> str:
-    """Extract plain text from a Feishu text message. Returns '' for non-text types."""
+    """从飞书 text消息中提取纯文本。非 text 类型返回 ''。"""
     if msg.message_type != "text":
         return ""
     try:

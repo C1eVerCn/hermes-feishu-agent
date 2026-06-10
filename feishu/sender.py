@@ -29,7 +29,7 @@ _client = lark.Client.builder() \
 
 
 def send(chat_id: str, text: str) -> None:
-    """Send text to a Feishu chat. Chunks if > CHUNK_SIZE. Rate-limited."""
+    """向飞书群聊发文本。超过 CHUNK_SIZE 自动分块。带限流。"""
     chunks = _chunk_text(text)
     for i, chunk in enumerate(chunks):
         prefix = f"[{i + 1}/{len(chunks)}]\n" if len(chunks) > 1 else ""
@@ -39,7 +39,7 @@ def send(chat_id: str, text: str) -> None:
 
 
 def send_to_user(open_id: str, text: str) -> None:
-    """Send a direct message to a user by open_id."""
+    """按 open_id 给用户发私信。"""
     chunks = _chunk_text(text)
     for i, chunk in enumerate(chunks):
         prefix = f"[{i + 1}/{len(chunks)}]\n" if len(chunks) > 1 else ""
@@ -49,7 +49,7 @@ def send_to_user(open_id: str, text: str) -> None:
 
 
 def send_card(chat_id: str, card: dict, max_retries: int = 3) -> None:
-    """Send an interactive card to a chat. Rate-limited like text sends."""
+    """向群聊发送互动卡片。限流策略同文本发送。"""
     global _last_send_time
     with _send_lock:
         elapsed = time.monotonic() - _last_send_time
@@ -163,7 +163,7 @@ def _chunk_text(text: str) -> list[str]:
         if len(text) <= CHUNK_SIZE:
             chunks.append(text)
             break
-        # Break at last whitespace before the limit
+        # 在字数限制前的最后一个空白处断开
         split_at = text.rfind(" ", 0, CHUNK_SIZE)
         if split_at == -1:
             split_at = CHUNK_SIZE

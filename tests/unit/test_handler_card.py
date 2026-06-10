@@ -27,10 +27,18 @@ def _make_event(text, open_id, chat_id):
     )
 
 
-def test_handle_dispatches_card_for_structured_result(monkeypatch):
+def test_handle_dispatches_card_for_structured_result(monkeypatch, tmp_path):
     import importlib
     import bot.handler as handler
+    import bot.identity_admin as ia_mod
+    importlib.reload(ia_mod)
     importlib.reload(handler)
+    # 预置 ou_x 为 role=1 (平台用户)
+    from bot.identity_admin import IdentityAdmin
+    test_admin = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    test_admin.set_role("ou_x", 1, operator="root")
+    monkeypatch.setattr(ia_mod, "get_admin", lambda: test_admin)
+    monkeypatch.setattr(handler, "get_identity_admin", lambda: test_admin)
 
     sent = {}
     monkeypatch.setattr(handler.sender, "send_card", lambda chat, card: sent.update(card=card, chat=chat))

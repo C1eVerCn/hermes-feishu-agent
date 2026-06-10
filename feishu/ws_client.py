@@ -17,10 +17,10 @@ from infra.metrics import metrics
 
 log = logging.getLogger(__name__)
 
-# Shared queue consumed by agent/handler.py
+# 由 agent/handler.py消费的共享队列
 event_queue: queue.Queue = queue.Queue(maxsize=1000)
 
-# Flag read by infra/health.py
+# infra/health.py读取的标志位
 ws_connected = threading.Event()
 
 # Card-action callback, injected by main.py (keeps feishu/ free of bot/ imports).
@@ -29,16 +29,16 @@ _card_action_handler = None
 
 
 def set_card_action_handler(fn) -> None:
-    """Inject the deterministic card-callback handler (bot.card_action_handler.handle)."""
+    """注入确定性卡片回调处理（bot.card_action_handler.handle）。"""
     global _card_action_handler
     _card_action_handler = fn
 
 
 def _on_message(data: P2ImMessageReceiveV1) -> None:
-    """Fast callback — only enqueue, never block."""
+    """快速回调 —只入队，不阻塞。"""
     msg = data.event.message
 
-    # Deduplicate by message_id (image events produce multiple event_ids per message)
+    #按 message_id 去重（图片事件每条消息会产生多个 event_id）
     if dedup.is_duplicate(msg.message_id):
         return
 
@@ -51,7 +51,7 @@ def _on_message(data: P2ImMessageReceiveV1) -> None:
 
 
 def _extract_card_action(data: P2CardActionTrigger):
-    """Pull (open_id, value) from a lark card action event."""
+    """从 lark卡片动作事件中取 (open_id, value)。"""
     op = data.event.operator
     open_id = getattr(op, "open_id", "") or ""
     value = getattr(data.event.action, "value", None) or {}
@@ -72,7 +72,7 @@ def _toast_text(resp) -> str:
 
 
 def _on_card_action(data: P2CardActionTrigger):
-    """Synchronous card callback: run the deterministic action, return a toast."""
+    """同步卡片回调：执行确定性动作，返回 toast。"""
     try:
         open_id, value = _extract_card_action(data)
         if _card_action_handler is None:

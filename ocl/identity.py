@@ -1,11 +1,10 @@
-"""open_id → {email, name} resolution via Feishu Contact API + in-memory cache.
-Role overrides from data/identity_map.json (open_id → role int) — used only when
-an admin explicitly assigns a role. With a real backend, per-user permissions are
-enforced server-side by emailAddress, so role is not gated locally.
+"""open_id → {email, name} 的身份解析层。
 
-Prior art: the previous version required mapping EVERY user's open_id→email
-manually in identity_map.json. Now email/name come from the Feishu API
-automatically, and the file only stores admin-assigned role overrides.
+通过飞书 Contact API +内存缓存解析用户身份；角色覆盖从 data/identity_map.json 读取。
+后台按 emailAddress 做权限校验；本地 OCL 只做粗粒度 role-based 工具门控。
+
+历史版本需要在 identity_map.json 里手动维护每个用户的 open_id→email。
+当前版本：email/name 由飞书 API 自动解析，文件里只存管理员手动覆盖的角色。
 """
 import json
 import os
@@ -25,7 +24,7 @@ _lock = threading.Lock()
 # ── in-memory caches (open_id → str) ─────────────────────────────────────
 _email_cache: dict[str, str] = {}
 _name_cache: dict[str, str] = {}
-# negative cache: open_ids we already tried to resolve but got nothing back
+# 负向缓存：尝试解析过但没有结果的 open_id
 _miss_cache: set[str] = set()
 
 # ── role overrides from identity_map.json ─────────────────────────────────

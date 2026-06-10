@@ -19,7 +19,7 @@ class Dedup:
     def __init__(self, max_size: int = _MAX_SIZE, ttl: float = _TTL_SECONDS) -> None:
         self._max_size = max_size
         self._ttl = ttl
-        self._seen: OrderedDict[str, float] = OrderedDict()  # key → timestamp
+        self._seen: OrderedDict[str, float] = OrderedDict()  # key → 时间戳
         self._lock = threading.Lock()
         self._insert_count = 0
 
@@ -32,14 +32,14 @@ class Dedup:
                 ts = self._seen[key]
                 if now - ts < self._ttl:
                     return True
-                # Expired entry — treat as new
+                #过期条目 —按新条目处理
                 del self._seen[key]
 
             self._seen[key] = now
             self._seen.move_to_end(key)
             self._insert_count += 1
 
-            # Periodic sweep and LRU eviction
+            #定期清理与 LRU驱逐
             if self._insert_count % 1000 == 0:
                 self._sweep(now)
             while len(self._seen) > self._max_size:

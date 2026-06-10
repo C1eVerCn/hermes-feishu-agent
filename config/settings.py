@@ -31,8 +31,8 @@ class Settings:
     AGENT_TIMEOUT_SECONDS: int = field(default_factory=lambda: int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")))
     AGENT_POOL_MAX_SIZE: int = field(default_factory=lambda: int(os.getenv("AGENT_POOL_MAX_SIZE", "100")))
 
-    MOCK_API_BASE_URL: str = field(default_factory=lambda: _optional("MOCK_API_BASE_URL", "http://localhost:9013"))
-    MOCK_API_TOKEN: str = field(default_factory=lambda: _optional("MOCK_API_TOKEN", ""))
+    BENCH_API_BASE_URL: str = field(default_factory=lambda: _optional("BENCH_API_BASE_URL", "http://localhost:9013"))
+    VLM_API_BASE_URL: str = field(default_factory=lambda: _optional("VLM_API_BASE_URL", "http://localhost:9014"))
 
     HTTP_PORT: int = field(default_factory=lambda: int(os.getenv("HTTP_PORT", "8088")))
     LOG_LEVEL: str = field(default_factory=lambda: _optional("LOG_LEVEL", "INFO"))

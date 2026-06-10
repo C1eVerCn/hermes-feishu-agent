@@ -83,3 +83,31 @@ def test_eviction_handles_missing_session_id(monkeypatch):
         pool._pool["user_A"] = broken_agent
         # Eviction must not raise
         pool.get_or_create("user_C")
+
+
+# ── enabled_toolsets alignment (added 2026-06-09 — bug fix) ────────────────
+
+def test_enabled_toolsets_match_registered_toolsets(monkeypatch):
+    """Regression: 'testbench' was hardcoded but no toolset was registered with
+    that name → LLM had zero tools → hallucinated JSON in text responses.
+    Ensure enabled_toolsets overlaps with at least one registered toolset."""
+    from bot.agent_pool import AgentPool
+    from tools.registry import registry
+    import bench_tools.register  # noqa: F401 — side-effect registration
+    import vlm_tools.register    # noqa: F401
+
+    with patch("bot.agent_pool.AIAgent", side_effect=_mock_agent) as mock_agent_cls:
+        pool = AgentPool(max_size=10)
+        pool.get_or_create("ou_alice")
+        enabled = mock_agent_cls.call_args.kwargs.get("enabled_toolsets") or []
+        registered = set(registry.get_registered_toolset_names())
+        overlap = set(enabled) & registered
+        assert overlap, (
+            f"enabled_toolsets={enabled} has no overlap with "
+            f"registered toolsets={sorted(registered)} — LLM will hallucinate tools"
+        )
+        # Specifically: must include "bench" (the test-bench reservation toolset)
+        assert "bench" in enabled, (
+            f"bench toolset not enabled; LLM cannot call reservation tools. "
+            f"enabled={enabled}"
+        )

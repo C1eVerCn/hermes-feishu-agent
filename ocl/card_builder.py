@@ -79,6 +79,40 @@ def _buttons_for(tool: str, r: dict) -> list[dict]:
     return []
 
 
+def _format_benches(data: list) -> str:
+    """Render list_available_benches data. Tolerates both list[str] (tests)
+    and list[dict{benchNo, architecture, status, location, group, dispatcher}]
+    (real API at :9013)."""
+    if not data:
+        return "当前没有可用台架。"
+    # Detect shape: first item is dict → table; else → bullet list.
+    if isinstance(data[0], dict):
+        rows = ["| 台架编号 | 架构 | 状态 | 位置 | 调度员 |",
+                "|---------|------|------|------|--------|"]
+        for b in data:
+            status = b.get("statusDesc") or b.get("status", "")
+            rows.append(
+                f"| {b.get('benchNo','')} | {b.get('architecture','')} | "
+                f"{status} | {b.get('location','')} | {b.get('dispatcher','')} |"
+            )
+        return "可用台架：\n" + "\n".join(rows)
+    # list[str] fallback
+    return "可用台架：\n" + "\n".join(f"- {b}" for b in data)
+
+
+def _format_architectures(data: list) -> str:
+    """Render list_architectures data. Tolerates list[str] (tests) and
+    list[dict{architecture, count}] (real API)."""
+    if not data:
+        return "当前没有可用架构。"
+    if isinstance(data[0], dict):
+        return "支持的架构：\n" + "\n".join(
+            f"- {a.get('architecture', a.get('name',''))} "
+            f"({a.get('count', '?')} 台)" for a in data
+        )
+    return "支持的架构：\n" + "\n".join(f"- {a}" for a in data)
+
+
 def build_card(text: str, captured: list[dict]) -> dict:
     elements: list[dict] = [_div(to_lark_md(text))]
     entry = _last_structured(captured)
@@ -95,11 +129,8 @@ def build_card(text: str, captured: list[dict]) -> dict:
                 if buttons:
                     elements.append(_action(buttons))
         elif tool in _LIST_BENCH_TOOLS:
-            if data:
-                elements.append(_div("可用台架：\n" + "\n".join(f"- {b}" for b in data)))
-            else:
-                elements.append(_div("当前没有可用台架。"))
+            elements.append(_div(_format_benches(data)))
         elif tool in _LIST_ARCH_TOOLS:
-            elements.append(_div("支持的架构：\n" + "\n".join(f"- {a}" for a in data)))
+            elements.append(_div(_format_architectures(data)))
 
     return {"config": {"wide_screen_mode": True}, "elements": elements}

@@ -54,5 +54,5 @@ class TypingIndicator:
         if resp.success():
             self._placeholder_message_id = resp.data.message_id
         else:
-            # Non-critical: log and continue without placeholder
+            #非关键：log 后继续，不发占位消息
             log.debug("typing indicator send failed: %s", resp.msg)

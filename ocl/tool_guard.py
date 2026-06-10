@@ -1,8 +1,12 @@
-"""Tool boundary enforcement + per-call user context via thread-local.
-Carries both the open_id (for permission) and the resolved email (for API injection).
+"""Tool boundary enforcement + per-call user context via contextvars.
+
+Uses `contextvars.ContextVar` (not `threading.local`) so that when the agent
+runs in a worker thread spawned by `concurrent.futures.ThreadPoolExecutor`,
+the per-request user/email context is automatically copied across the thread
+boundary (Python 3.7+ does this in `Executor.submit` via `copy_context`).
 """
+import contextvars
 import json
-import threading
 import logging
 from typing import Callable
 
@@ -10,23 +14,24 @@ from ocl import permission
 
 log = logging.getLogger(__name__)
 
-_current = threading.local()
+_user_id: contextvars.ContextVar[str] = contextvars.ContextVar("ocl_user_id", default="")
+_email: contextvars.ContextVar[str] = contextvars.ContextVar("ocl_email", default="")
 
 
 def set_current_user(user_id: str) -> None:
-    _current.user_id = user_id
+    _user_id.set(user_id)
 
 
 def get_current_user() -> str:
-    return getattr(_current, "user_id", "")
+    return _user_id.get()
 
 
 def set_current_email(email: str) -> None:
-    _current.email = email
+    _email.set(email)
 
 
 def get_current_email() -> str:
-    return getattr(_current, "email", "")
+    return _email.get()
 
 
 def guarded(tool_name: str, inner_handler: Callable) -> Callable:

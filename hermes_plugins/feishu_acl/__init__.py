@@ -99,7 +99,7 @@ def _on_post_tool_call(
 
 
 def register(ctx) -> None:
-    """Plugin entry point. Called once by hermes's PluginManager."""
+    """插件入口，由 hermes 的 PluginManager 调用一次。"""
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     logger.info("feishu_acl plugin registered: pre_tool_call + post_tool_call hooks active")

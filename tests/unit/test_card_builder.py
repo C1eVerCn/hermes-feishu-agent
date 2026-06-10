@@ -83,3 +83,56 @@ def test_error_result_no_data_block_no_buttons():
     actions = [e for e in card["elements"] if e.get("tag") == "action"]
     assert actions == []
     assert "预约失败" in _div_texts(card)
+
+
+# ── Dict-shaped data from real API (added 2026-06-09 — bug fix) ─────────────
+
+def test_available_benches_dict_shape_renders_table():
+    """Real API returns list[dict{benchNo, architecture, status, ...}];
+    card should render a markdown table, not Python repr."""
+    captured = [{"tool": "list_available_benches", "result": {"code": 200, "data": [
+        {"benchNo": "B-001", "architecture": "1.0架构", "status": 0,
+         "statusDesc": "可用", "location": "A区", "dispatcher": "张工"},
+        {"benchNo": "B-002", "architecture": "1.0架构", "status": 1,
+         "statusDesc": "占用", "location": "A区", "dispatcher": "张工"},
+    ]}}]
+    card = build_card("当前可用台架", captured)
+    text = _div_texts(card)
+    assert "B-001" in text
+    assert "1.0架构" in text
+    assert "可用" in text
+    assert "A区" in text
+    assert "张工" in text
+    # Table format present
+    assert "| 台架编号" in text
+    assert "|---------" in text
+
+
+def test_available_benches_dict_empty():
+    captured = [{"tool": "list_available_benches", "result": {"code": 200, "data": []}}]
+    card = build_card("查询完成", captured)
+    text = _div_texts(card)
+    assert "没有可用台架" in text
+
+
+def test_architectures_dict_shape_renders_with_count():
+    """Real API may return list[dict{architecture, count}]."""
+    captured = [{"tool": "list_architectures", "result": {"code": 200, "data": [
+        {"architecture": "1.0架构", "count": 5},
+        {"architecture": "L3架构", "count": 3},
+    ]}}]
+    card = build_card("支持的架构", captured)
+    text = _div_texts(card)
+    assert "1.0架构" in text
+    assert "L3架构" in text
+    assert "5 台" in text
+    assert "3 台" in text
+
+
+def test_architectures_list_str_fallback_still_works():
+    """Backward compat: list[str] shape (used by old tests + possible LLM mock)"""
+    captured = [{"tool": "list_architectures", "result": {"code": 200, "data": ["1.0架构", "L3架构"]}}]
+    card = build_card("支持以下架构", captured)
+    text = _div_texts(card)
+    assert "1.0架构" in text
+    assert "L3架构" in text

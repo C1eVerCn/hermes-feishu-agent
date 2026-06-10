@@ -35,7 +35,7 @@ def test_my_permission_reports_platform_user(monkeypatch):
     handler = _make_handler()
     monkeypatch.setattr(handler.identity, "email_of", lambda oid: "zhangsan@example.com")
     out = handler._handle_identity_query("我的权限", "ou_user")
-    assert "平台用户" in out
+    assert "普通用户" in out or "调度员" in out or "管理员" in out
     assert "zhangsan@example.com" in out
 
 
@@ -43,7 +43,7 @@ def test_my_permission_non_platform(monkeypatch):
     handler = _make_handler()
     monkeypatch.setattr(handler.identity, "email_of", lambda oid: "")
     out = handler._handle_identity_query("我的权限", "ou_ghost")
-    assert "还不是平台用户" in out
+    assert "待审核" in out
 
 
 def test_identity_query_empty_for_other_text():
@@ -53,12 +53,22 @@ def test_identity_query_empty_for_other_text():
 
 # ── Admin set-role ─────────────────────────────────────────────────────────────
 
-def test_set_role_admin_command():
+def test_set_role_admin_command(tmp_path, monkeypatch):
+    """用 identity_admin 验证 set_role 行为。"""
+    import importlib
+    import bot.identity_admin as ia_mod
+    importlib.reload(ia_mod)
+    from bot.identity_admin import IdentityAdmin
+    # 注入 tmp identity_admin
+    admin_inst = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(ia_mod, "get_admin", lambda: admin_inst)
+    admin_inst.set_role("ou_admin", 3, operator="root")
+    # 同样把 handler 里的引用替换
     handler = _make_handler()
-    out = handler._handle_admin_command("设置角色 ou_target 2", "ou_admin")  # role-3 admin
+    monkeypatch.setattr(handler, "get_identity_admin", lambda: admin_inst)
+    out = handler._handle_admin_command("设置角色 ou_target 2", "ou_admin")
     assert "已设置" in out
-    import ocl.identity as identity
-    assert identity.role_of("ou_target") == 2
+    assert admin_inst.get_role("ou_target") == 2
 
 
 def test_set_role_rejected_for_non_admin():
