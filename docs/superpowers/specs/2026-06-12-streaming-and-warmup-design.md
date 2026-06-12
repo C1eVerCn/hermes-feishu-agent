@@ -109,7 +109,7 @@ feishu/ws_client → bot/handler._handle
 | 失败 | 触发 | 恢复 |
 |------|------|------|
 | A. Typing 占位发送失败 | 飞书 typing 消息发不出 (群禁言/用户关机器人) | log warning,继续走 stream + card,用户最终仍看到 card |
-| B. Stream edit 失败 | PATCH `/messages/{id}` 报 429/网络错 | 累积未发送的 token,下次 push 一起发;连续 3 次失败 → fallback 到原"全量 send_card" 路径 |
+| B. Stream edit 失败 | PATCH `/messages/{id}` 报 429/网络错 | 累积未发送的 token,下次 push 一起发;连续 3 次失败(hardcoded 阈值)→ fallback 到原"全量 send_card" 路径 |
 | C. Tool call 失败 | fmp backend 不可用 | LLM 收到工具错误按现有逻辑处理 ("服务暂时无法连接"),继续 stream |
 | D. 后台预热线程失败 | 首次预热抛异常 (hermes-agent 内部错) | 静默 log,不影响主流程;下次消息时主流程会再走懒加载 |
 
@@ -148,10 +148,12 @@ T=4.5s   sender.send_card(chat_id, card)
 **冷启动场景: 容器重启后首条消息**
 
 ```
-T=0     容器启动
-T=+1s   agent_pool 创建,后台 spawn _warmup 线程调 agent.chat("hello")
-T=+47s  warmup 完成,hermes-agent 内部 state 准备好
-T=+60s  User 发消息 → agent_pool cache hit → 同稳态路径 → T=2s 内看到首 token
+T=0      容器启动
+T=+1s    agent_pool 首次创建,后台 spawn _warmup 线程调 agent.chat("hello")
+T=+1-47s warmup 线程在后台异步跑,触发 hermes-agent 内部 lazy init
+         (具体时长依赖 hermes 内部;首条消息发出时大概率已完成)
+T=+60s   User 发消息 → agent_pool cache hit → 同稳态路径 → T=2s 内看到首 token
+         (若 warmup 未完成,主流程再走一次懒加载;容错 fallback 不影响正确性)
 ```
 
 ### 4.1 用户感知时间线
