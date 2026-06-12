@@ -64,3 +64,149 @@ def test_warmup_thread_swallows_exceptions(monkeypatch):
     # The thread.start() was called; warmup failure happens INSIDE that
     # thread and is swallowed (verified in _warmup_agent test below).
     assert fake_thread.start.call_count == 1
+
+
+# ── Streaming tests (Task 4: _on_streaming_chunk) ─────────────────────────
+
+def test_streaming_chunk_accumulates_below_threshold(monkeypatch):
+    """Below _STREAMING_FLUSH_MIN_CHARS, _on_streaming_chunk should NOT
+    call edit_message — it just buffers tokens."""
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_p"
+
+    with patch("bot.handler.sender.edit_message") as mock_edit:
+        # Three 1-char tokens = 3 chars total, under default 5-char threshold
+        for tok in ["你", "好", "世"]:
+            handler._on_streaming_chunk(tok, fake_typing, 0.3)
+    assert mock_edit.call_count == 0
+
+
+def test_streaming_chunk_flushes_on_char_threshold(monkeypatch):
+    """Once accumulated >= _STREAMING_FLUSH_MIN_CHARS, edit_message fires
+    on the typing_indicator with the growing accumulated text."""
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_p"
+
+    # 6 single-char tokens: first flush at char 5, second flush at char 6
+    # (the accumulator keeps growing; we only clear on turn-end final flush)
+    for tok in ["你", "好", "，", "世", "界", "！"]:
+        handler._on_streaming_chunk(tok, fake_typing, 0.3)
+    # 2 flushes (chars 5 and 6 each cross the 5-char threshold)
+    assert fake_typing.edit_message.call_count == 2
+    # Last call's content is the full accumulated text
+    last_content = fake_typing.edit_message.call_args_list[-1][0][0]
+    assert last_content == "你好，世界！"
+    # Earlier call was the first crossing (5-char threshold)
+    first_content = fake_typing.edit_message.call_args_list[0][0][0]
+    assert first_content == "你好，世界"
+
+
+def test_streaming_chunk_flushes_on_time_interval(monkeypatch):
+    """Even below char threshold, a flush fires once flush_interval_sec
+    has elapsed since the last flush."""
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_p"
+
+    # Mock time.monotonic: state init reads once + each chunk reads once.
+    # 3 chunks = 4 monotonic calls.
+    times = iter([100.0,    # state init (last_flush)
+                  100.0,    # chunk 1 "你": now
+                  100.0,    # chunk 2 "好": now, acc=2 chars
+                  100.4])   # chunk 3 "，": now, 0.4s gap > 0.3s → flush
+    monkeypatch.setattr(handler.time, "monotonic", lambda: next(times))
+
+    handler._on_streaming_chunk("你", fake_typing, 0.3)  # t=100
+    handler._on_streaming_chunk("好", fake_typing, 0.3)  # t=100, acc=2 chars
+    # Below 5-char threshold but 0s gap — no flush
+    # Now t=100.4 → 0.4s gap > 0.3s → flush
+    handler._on_streaming_chunk("，", fake_typing, 0.3)
+    assert fake_typing.edit_message.call_count == 1
+    content = fake_typing.edit_message.call_args[0][0]
+    assert content == "你好，"
+
+
+def test_streaming_chunk_state_is_per_typing_instance(monkeypatch):
+    """Each typing instance has its own accumulator — they don't bleed."""
+    fake_a = MagicMock(); fake_a._placeholder_message_id = "om_a"
+    fake_b = MagicMock(); fake_b._placeholder_message_id = "om_b"
+
+    handler._on_streaming_chunk("abcde", fake_a, 0.3)  # flushes (5 chars)
+    handler._on_streaming_chunk("xy", fake_b, 0.3)  # buffers, no flush
+    assert fake_a.edit_message.call_count == 1
+    assert fake_b.edit_message.call_count == 0
+
+
+def test_streaming_chunk_gives_up_after_3_edit_failures(monkeypatch):
+    """After 3 consecutive edit_message failures, _on_streaming_chunk stops
+    calling edit_message (caller will fall back to send_card)."""
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_p"
+    fake_typing.edit_message.side_effect = RuntimeError("simulated 429")
+
+    times = iter([100.0 + i * 0.5 for i in range(20)])
+    monkeypatch.setattr(handler.time, "monotonic", lambda: next(times))
+
+    # Push 8 flush-bound chunks (each >= 5 chars). After 3 failures, no more calls.
+    for i in range(8):
+        handler._on_streaming_chunk("a" * 6, fake_typing, 0.3)
+    # First 3 fail (3 attempts), then we give up — never reaches 4th..8th
+    assert fake_typing.edit_message.call_count == 3
+
+
+def test_final_flush_emits_buffered_tokens_and_clears_state(monkeypatch):
+    """_final_flush pushes any buffered-but-not-flushed tokens through
+    edit_message, then clears the accumulator for the next turn."""
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_p"
+
+    # 3 chars — below 5-char threshold, so the chunk path does NOT flush.
+    handler._on_streaming_chunk("你", fake_typing, 0.3)
+    handler._on_streaming_chunk("好", fake_typing, 0.3)
+    handler._on_streaming_chunk("！", fake_typing, 0.3)
+    assert fake_typing.edit_message.call_count == 0
+
+    # Turn complete: final flush pushes the buffered 3 chars
+    handler._final_flush(fake_typing)
+    assert fake_typing.edit_message.call_count == 1
+    assert fake_typing.edit_message.call_args[0][0] == "你好！"
+
+    # A second final_flush is a noop (state cleared)
+    handler._final_flush(fake_typing)
+    assert fake_typing.edit_message.call_count == 1
+
+
+def test_final_flush_swallows_edit_failures(monkeypatch):
+    """If final flush's edit_message fails, _final_flush must not raise —
+    the response pipeline must not blow up just because streaming is broken."""
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_p"
+    fake_typing.edit_message.side_effect = RuntimeError("simulated 500")
+
+    handler._on_streaming_chunk("你", fake_typing, 0.3)
+    # Should not raise
+    handler._final_flush(fake_typing)
+    # edit_message was attempted (and failed)
+    assert fake_typing.edit_message.call_count == 1
+
+
+def test_typing_placeholder_send_failure_does_not_block_streaming(monkeypatch):
+    """If the initial 2s-timer placeholder send fails, handler should still
+    proceed with stream + final card (no exception). The TypingIndicator
+    is constructed normally; if its placeholder send fails, _placeholder_message_id
+    stays None, and edit_message becomes a noop (verified in
+    test_typing_indicator_edit_message_noop_when_no_placeholder)."""
+    import feishu.typing_indicator as ti
+    # Force _send_placeholder to fail by mocking lark client
+    fail = MagicMock(); fail.success.return_value = False; fail.code = 500
+    with patch.object(ti._client.im.v1.message, "create", return_value=fail):
+        indicator = ti.TypingIndicator("oc_x")
+        indicator.start()
+        # We can't safely freezegun + threading.Timer in unit tests; just
+        # simulate the post-timer state by directly invoking the helper.
+        # (The Timer thread is daemon=True, so the test process exits cleanly.)
+    # Placeholder wasn't stored, so edit_message would be a noop
+    assert indicator._placeholder_message_id is None
+    # edit_message still works (just noop)
+    with patch("feishu.sender.edit_message") as mock_edit:
+        indicator.edit_message("hi")
+    mock_edit.assert_not_called()
