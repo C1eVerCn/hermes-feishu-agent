@@ -17,24 +17,16 @@ _client = lark.Client.builder() \
 PLACEHOLDER_TEXT = "⏳ 正在处理，请稍候..."
 THRESHOLD_SECONDS = 2.0
 
-# Card structure for the placeholder. We send a card (interactive) message
-# rather than a plain text message because Feishu's PATCH /im/v1/messages
-# API only supports updating card (interactive) messages — text messages
-# cannot be edited in place. The card has a single text element that
-# edit_message() rewrites with the streaming token buffer.
-def _card_payload(text: str) -> dict:
-    return {
-        "config": {"wide_screen_mode": True},
-        "elements": [
-            {"tag": "div", "text": {"tag": "plain_text", "content": text}},
-        ],
-    }
-
 
 class TypingIndicator:
     """
     Sends a placeholder message if the LLM takes longer than THRESHOLD_SECONDS.
     Call start() before the LLM call, stop() after.
+
+    NOTE: Feishu IM has no delete-message API, so the placeholder can't
+    be removed once sent. The bot currently does NOT use this indicator
+    (handler.py waits for the LLM and posts the final response directly).
+    Kept here for potential re-introduction of streaming UX.
     """
 
     def __init__(self, chat_id: str) -> None:
@@ -48,20 +40,10 @@ class TypingIndicator:
         self._timer.start()
 
     def stop(self) -> None:
-        # Don't delete the placeholder: Feishu IM has no delete-message API.
-        # The placeholder stays as the streaming target, then gets covered
-        # by edit_message into the final response.
+        # Cancel the pending timer (no-op if placeholder was already sent).
         if self._timer:
             self._timer.cancel()
             self._timer = None
-
-    def edit_message(self, content_text: str) -> None:
-        """Update the placeholder bubble in place with new text. Noop if
-        the placeholder wasn't sent (timer didn't fire yet)."""
-        if self._placeholder_message_id is None:
-            return
-        from feishu import sender
-        sender.edit_message(self._placeholder_message_id, content_text)
 
     def _send_placeholder(self) -> None:
         req = CreateMessageRequest.builder() \
@@ -69,8 +51,8 @@ class TypingIndicator:
             .request_body(
                 CreateMessageRequestBody.builder()
                 .receive_id(self._chat_id)
-                .msg_type("interactive")
-                .content(json.dumps(_card_payload(PLACEHOLDER_TEXT), ensure_ascii=False))
+                .msg_type("text")
+                .content(json.dumps({"text": PLACEHOLDER_TEXT}))
                 .build()
             ).build()
 

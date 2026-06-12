@@ -40,68 +40,6 @@ _INPUT_TOO_LONG_REPLY = "抱歉，消息过长（超过 8000 字），请分段�
 _NON_PLATFORM_REPLY_TEMPLATE = "您还不是平台用户（您的 open_id: {open_id}），请联系管理员开通。管理员可在飞书发「设置角色 {open_id} 1|2|3」设置您的权限。"
 _MAX_INPUT_CHARS = 8000
 
-# Streaming tuning: minimum accumulated chars before a flush, max seconds
-# between flushes. Both hardcoded (per spec §3.4).
-_STREAMING_FLUSH_MIN_CHARS = 5
-_STREAMING_FLUSH_INTERVAL_SEC = 0.3
-
-# Per-typing-accumulator state. Keyed by id(typing_indicator) because
-# MagicMock test doubles auto-create any attribute access, which makes
-# hasattr/getattr-with-default unreliable for lazy init.
-_stream_state: dict[int, dict] = {}
-
-
-def _stream_get_or_init(typing_indicator) -> dict:
-    state = _stream_state.get(id(typing_indicator))
-    if state is None:
-        state = {
-            "acc": "",
-            "last_flush": time.monotonic(),
-            "edit_failures": 0,
-        }
-        _stream_state[id(typing_indicator)] = state
-    return state
-
-
-def _on_streaming_chunk(token: str, typing_indicator, flush_interval_sec: float) -> None:
-    """Called by the stream_callback for every LLM token. Accumulates tokens
-    and flushes to the typing placeholder in batches, throttled by both
-    char-count and time-since-last-flush. After 3 consecutive edit_message
-    failures on the same typing instance, stops trying (caller will fall
-    back to a single send_card at end of turn)."""
-    state = _stream_get_or_init(typing_indicator)
-    now = time.monotonic()
-    state["acc"] += token
-    should_flush = (
-        len(state["acc"]) >= _STREAMING_FLUSH_MIN_CHARS
-        or now - state["last_flush"] >= flush_interval_sec
-    )
-    if not should_flush:
-        return
-    if state["edit_failures"] >= 3:
-        # Give up streaming edits; caller will fall back to send_card.
-        return
-    try:
-        typing_indicator.edit_message(state["acc"])
-        state["last_flush"] = now
-    except Exception as e:
-        state["edit_failures"] += 1
-        log.warning("streaming_edit_failed attempt=%d err=%s",
-                    state["edit_failures"], e)
-
-
-def _final_flush(typing_indicator) -> None:
-    """Flush any buffered tokens that didn't hit the throttle. Called by
-    the handler once the LLM turn completes. Clears the accumulator so
-    the next message starts clean."""
-    state = _stream_state.get(id(typing_indicator))
-    if state and state["acc"]:
-        try:
-            typing_indicator.edit_message(state["acc"])
-        except Exception:
-            log.warning("streaming_final_flush_failed", exc_info=True)
-        state["acc"] = ""
-
 # ── Layer 0: Instant replies for simple intents (no agent, <1ms) ──────────
 
 _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
@@ -328,15 +266,11 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         # Otherwise fall through to LLM (user might want to amend args)
 
     # ── Agent call ──────────────────────────────────────────────────────────
-
-    # ── Agent call ──────────────────────────────────────────────────────────
-    # Typing indicator: 2s 后 LLM 还没回就先发"⏳ 正在处理"占位气泡
-    # 让用户立刻看到反馈（实际回复可能还要 5-30s）
-    from feishu.typing_indicator import TypingIndicator
-    typing = TypingIndicator(chat_id)
-    typing.start()
-
-    session_id = f"feishu_{user_id}"  # 必须与 agent_pool 的 session_id 一致
+    # No streaming: just wait for the LLM and post the final response.
+    # Common single-tool queries are handled by the fast-path above
+    # (Layer 0.5 / 0.6) and return in <1s; only complex/free-form requests
+    # reach the LLM here, and those are intrinsically multi-call (30s+).
+    session_id = f"feishu_{user_id}"
     start = time.monotonic()
     captured: list[dict] = []
     try:
@@ -345,24 +279,17 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         log.info("trace[agent_pool.get_or_create] took=%.2fs", time.monotonic() - t0)
         set_current_user(user_id)
         set_current_email(email)
-        # 关键：contextvars 不会跨线程自动传播——必须在提交任务前 copy_context，
+        # contextvars 不会跨线程自动传播——必须在提交任务前 copy_context，
         # 再让 worker 在副本 context 里跑 agent.chat()，否则 worker 里
         # get_current_email() 拿到空串，POST body 缺 emailAddress。
         ctx = contextvars.copy_context()
         tool_capture.clear(session_id)
         t1 = time.monotonic()
-        # Wire stream_callback into agent.chat so LLM tokens are pushed to
-        # the typing placeholder in real time. See spec §3.2.
-        def _stream_cb(token: str) -> None:
-            _on_streaming_chunk(token, typing, _STREAMING_FLUSH_INTERVAL_SEC)
-        future = _executor.submit(ctx.run, agent.chat, text, _stream_cb)
+        future = _executor.submit(ctx.run, agent.chat, text)
         log.info("trace[executor.submit] took=%.2fs", time.monotonic() - t1)
         t2 = time.monotonic()
         response: str = future.result(timeout=settings.AGENT_TIMEOUT_SECONDS)
         log.info("trace[future.result] took=%.2fs", time.monotonic() - t2)
-        # Final flush of any buffered tokens that didn't hit the throttle,
-        # then clear streaming state so the next message starts clean.
-        _final_flush(typing)
         captured = tool_capture.read(session_id)
         latency = time.monotonic() - start
         metrics.record("llm_latency_seconds", latency)
@@ -377,7 +304,6 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         metrics.inc("errors_agent")
         response = _ERROR_REPLY
     finally:
-        typing.stop()
         set_current_user("")
         set_current_email("")
         tool_capture.clear(session_id)
