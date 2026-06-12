@@ -256,6 +256,23 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         sender.send_text_as_card(chat_id, instant)
         return
 
+    # ── Layer 0.5: Fast path for known single-tool queries ────────────────
+    # Inspired by the car-booking reference's "LLM only classifies, graph
+    # calls tools" design. For the common cases ("查询可用台架", "我的预约"),
+    # we skip the 2-call LLM dance (decision + summary, ~30s) and call the
+    # tool directly via bench_handlers (already wrapped with guarded() for
+    # permission + email injection). Expected latency: 30s → <1s.
+    # Unmatched queries fall through to the hermes-agent path.
+    fast = _try_fast_path(text, user_id, email, role)
+    if fast is not None:
+        if fast.blocked:
+            sender.send_text_as_card(chat_id, fast.text)
+        elif fast.card is not None:
+            sender.send_card(chat_id, fast.card)
+        else:
+            sender.send_text_as_card(chat_id, fast.text or _ERROR_REPLY)
+        return
+
     # ── Identity query / admin command (bypass agent) ─────────────────────
     identity_response = _handle_identity_query(text, user_id)
     if identity_response:
@@ -461,6 +478,123 @@ def _match_simple_intent(text: str) -> str:
         if pattern.search(text):
             return reply
     return ""
+
+
+# ── Fast path: bypass hermes-agent for known single-tool queries ───────────
+# Inspired by the car-booking reference (state graph with LLM only for
+# classification). The LLM does 2 calls per turn in the ReAct flow
+# (decision + summary, ~30s for minimax M2.7-highspeed). For the most
+# common queries, the LLM is unnecessary — a regex match + a direct
+# tool call + OCL formatting is enough and finishes in <1s.
+#
+# We do NOT bypass hermes-agent for reserve/cancel/return flows — those
+# need the LLM's natural-language understanding to extract complex args
+# (vehicle type, platform, time, task name, etc.) and benefit from the
+# dry_run → confirm two-step interaction that the LLM drives.
+#
+# Each entry: (compiled regex, tool_name, args_extractor). The regex is
+# matched against the trimmed input; the args_extractor builds the dict
+# passed to bench_handlers.<tool_name>(args). Patterns are anchored at
+# the end with $ to avoid false matches like "查询可用台架的剩余数量"
+# (which the LLM handles better).
+
+_FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
+    # ── list_available_benches ──
+    (re.compile(r'^(查询|查看|看看|有什么|列出|看)(\s*(所有|可用))?\s*台架(\s*(列表|号|编号))?[\s!！。.]*$'),
+     'list_available_benches', lambda m: {}),
+    # "台架列表" / "台架号" — noun-phrase variant
+    (re.compile(r'^台架(\s*(列表|号|编号))?[\s!！。.]*$'),
+     'list_available_benches', lambda m: {}),
+    # "查询 1.0 架构台架" / "看看 1.5 架构的台架"
+    (re.compile(r'^(查询|查看|看看)\s*([\d.]+|L\d+)\s*架构(\s*的?\s*台架)?[\s!！。.]*$'),
+     'list_available_benches',
+     lambda m: {'architecture': (m.group(2) if m.group(2).startswith('L') else m.group(2)) + '架构'}),
+    # "L3 架构的台架" / "1.0 架构台架" — noun phrase (no verb)
+    (re.compile(r'^([\d.]+|L\d+)\s*架构(\s*的?\s*台架)?[\s!！。.]*$'),
+     'list_available_benches',
+     lambda m: {'architecture': (m.group(1) if m.group(1).startswith('L') else m.group(1)) + '架构'}),
+
+    # ── list_architectures ──
+    (re.compile(r'^(查询|查看|看看)\s*(台架)?架构(\s*列表)?[\s!！。.]*$'),
+     'list_architectures', lambda m: {}),
+    (re.compile(r'^(台架架构|架构列表)[\s!！。.]*$'),
+     'list_architectures', lambda m: {}),
+
+    # ── list_my_reservations ──
+    (re.compile(r'^(我的|看看我的|查看我的|看下我的)\s*(预约|记录|预约记录|所有预约)[\s!！。.]*$'),
+     'list_my_reservations', lambda m: {}),
+
+    # ── list_my_approvals ──
+    (re.compile(r'^(我的|看看我的|查看我的)?\s*(待审批|待我审批|审批列表|待审批列表)[\s!！。.]*$'),
+     'list_my_approvals', lambda m: {}),
+]
+
+
+def _try_fast_path(text: str, user_id: str, email: str, role: int):
+    """Bypass hermes-agent for known query patterns. Returns the OCL
+    result (already run on the tool output) or None if no match.
+
+    Returns None on:
+    - no regex match (fall through to LLM)
+    - regex match but tool permission denied
+    - tool call raised (fall through to LLM, which can retry or error)
+
+    The bench_handlers are already wrapped with guarded() for permission
+    + email injection (Layer 2 of double-defense), so calling them
+    directly from here maintains the security model.
+    """
+    norm = text.strip()
+    if not norm:
+        return None
+    for pattern, tool_name, args_fn in _FAST_PATH_PATTERNS:
+        m = pattern.match(norm)
+        if not m:
+            continue
+
+        # Role gate (matches the OCL TOOL_MIN_ROLE table)
+        from ocl.permission import TOOL_MIN_ROLE
+        if TOOL_MIN_ROLE.get(tool_name, 99) > role:
+            return None  # user's role can't run this tool — let LLM explain
+
+        # Inject identity context (handlers read email via thread-local)
+        set_current_user(user_id)
+        set_current_email(email)
+
+        from bench_tools import handlers as bench_handlers
+        handler = getattr(bench_handlers, tool_name, None)
+        if handler is None:
+            log.warning("fast_path handler_missing tool=%s", tool_name)
+            return None
+
+        args = args_fn(m)
+        t0 = time.monotonic()
+        try:
+            raw_result = handler(args)
+        except Exception:
+            log.exception("fast_path tool_failed tool=%s user=%s", tool_name, user_id)
+            return None
+        latency_ms = (time.monotonic() - t0) * 1000
+        log.info("fast_path hit tool=%s user=%s latency=%.0fms",
+                 tool_name, user_id, latency_ms)
+        metrics.inc("fast_path_hits")
+
+        # Build the captured entry as if the LLM had called the tool.
+        # card_builder reads this to render the structured card.
+        captured = [{"tool": tool_name, "result": raw_result}]
+        ocl_result = ocl_apply("", user_id, captured=captured)
+        # If the tool returned an error, prefer the error text over an
+        # empty card (OCL's empty-text + non-200 captured produces a
+        # blank-looking card).
+        if ocl_result.card is not None:
+            try:
+                parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+                if isinstance(parsed, dict) and parsed.get("code") != 200:
+                    err_text = parsed.get("msg") or _ERROR_REPLY
+                    return ocl_result.__class__(text=err_text, blocked=False, card=None)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return ocl_result
+    return None
 
 
 def _extract_text(msg) -> str:

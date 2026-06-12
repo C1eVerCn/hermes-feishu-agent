@@ -32,11 +32,20 @@ def _make_handler():
 # ── Identity query ───────────────────────────────────────────────────────────
 
 def test_my_permission_reports_platform_user(monkeypatch):
+    """Identity reply shows role name + capabilities but NOT PII
+    (open_id / email / name). Privacy hardening 2026-06-10."""
     handler = _make_handler()
     monkeypatch.setattr(handler.identity, "email_of", lambda oid: "zhangsan@example.com")
+    # Replace get_identity_admin to return role=1 for ou_user
+    admin = handler.get_identity_admin()
+    admin.set_role("ou_user", 1, operator="test", note="fixture")
     out = handler._handle_identity_query("我的权限", "ou_user")
-    assert "普通用户" in out or "调度员" in out or "管理员" in out
-    assert "zhangsan@example.com" in out
+    assert "普通用户" in out
+    # PII must NOT leak to the user
+    assert "zhangsan@example.com" not in out
+    assert "ou_user" not in out
+    # Capabilities must still be present
+    assert "可查询" in out or "预约" in out
 
 
 def test_my_permission_non_platform(monkeypatch):
@@ -44,6 +53,9 @@ def test_my_permission_non_platform(monkeypatch):
     monkeypatch.setattr(handler.identity, "email_of", lambda oid: "")
     out = handler._handle_identity_query("我的权限", "ou_ghost")
     assert "待审核" in out
+    # role=0 case is the EXCEPTION: open_id must be visible so user can
+    # relay it to the admin for manual role assignment.
+    assert "ou_ghost" in out
 
 
 def test_identity_query_empty_for_other_text():
@@ -120,3 +132,158 @@ def test_complex_query_not_matched():
     assert not handler._match_simple_intent("帮我查一下可用台架")
     assert not handler._match_simple_intent("预约台架 TJ002")
     assert not handler._match_simple_intent("你好啊，最近台架忙吗")  # trailing content
+
+
+# ── Fast path (single-tool query bypass) ───────────────────────────────────
+
+class TestFastPathMatching:
+    """Pure regex matching — no mocks needed."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+
+    def _hit(self, text):
+        return self.handler._try_fast_path(text, "ou_x", "x@y.com", 1)
+
+    def test_query_benches_matched(self):
+        assert self._hit("查询可用台架") is not None
+        assert self._hit("查看台架") is not None
+        assert self._hit("看看台架") is not None
+        assert self._hit("有什么台架") is not None
+        assert self._hit("台架列表") is not None
+        assert self._hit("查询台架") is not None
+
+    def test_query_architecture_matched(self):
+        assert self._hit("查询架构") is not None
+        assert self._hit("台架架构") is not None
+        assert self._hit("架构列表") is not None
+
+    def test_my_reservations_matched(self):
+        assert self._hit("我的预约") is not None
+        assert self._hit("看看我的预约") is not None
+        assert self._hit("我的记录") is not None
+        assert self._hit("我的所有预约") is not None
+
+    def test_my_approvals_matched(self):
+        assert self._hit("我的待审批") is not None
+        assert self._hit("待审批") is not None
+        assert self._hit("审批列表") is not None
+
+    def test_architecture_specific_query_matched(self):
+        # "查询 1.0 架构台架" — should hit list_available_benches with arg
+        assert self._hit("查询 1.0 架构台架") is not None
+        assert self._hit("查询 1.5 架构") is not None
+        assert self._hit("L3 架构的台架") is not None
+
+    def test_complex_queries_not_matched(self):
+        # These need LLM understanding — must NOT be fast-pathed
+        assert self._hit("帮我预约 TJ002 明天上午跑高速") is None
+        assert self._hit("查询可用台架的剩余数量") is None  # has trailing content
+        assert self._hit("为什么我的预约还没审批") is None
+        assert self._hit("把 TJ001 改成下午") is None
+        assert self._hit("你好") is None
+        assert self._hit("") is None
+
+    def test_case_insensitive_punctuation(self):
+        assert self._hit("查询可用台架。") is not None
+        assert self._hit("查询可用台架!") is not None
+        assert self._hit("查询可用台架  ") is not None  # trailing whitespace
+
+
+class TestFastPathPermission:
+    """Fast path must respect OCL TOOL_MIN_ROLE (matches L1 plugin / L2 guarded)."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+        from ocl.pipeline import OclResult
+        self.OclResult = OclResult
+
+    def test_role_0_user_bypassed(self, monkeypatch):
+        # Role 0 (non-platform) — fast path must NOT execute tool,
+        # so handler doesn't even get a chance to fail-open
+        out = self.handler._try_fast_path("查询可用台架", "ou_guest", "g@x.com", 0)
+        # Falls through (None) — existing role=0 reject handles it
+        assert out is None
+
+    def test_normal_user_can_query_benches(self, monkeypatch):
+        fake_card = {"elements": [{"tag": "div", "text": {"content": "data"}}]}
+        fake_ocl = self.OclResult(text="", blocked=False, card=fake_card)
+        captured_args = {}
+        with patch.object(self.handler, "ocl_apply", return_value=fake_ocl) as mock_apply, \
+             patch.object(self.handler.bench_handlers, "list_available_benches",
+                         side_effect=lambda a: captured_args.setdefault("args", a) or
+                                                '{"code": 200, "data": ["TJ001"]}'):
+            out = self.handler._try_fast_path("查询可用台架", "ou_user", "u@x.com", 1)
+        assert out is not None
+        assert out.card == fake_card
+        assert captured_args["args"] == {}
+        # Email was injected via context
+        from ocl.tool_guard import get_current_email
+        assert get_current_email() == "u@x.com"
+
+    def test_architecture_specific_query_passes_architecture_arg(self, monkeypatch):
+        fake_card = {"elements": []}
+        fake_ocl = self.OclResult(text="", blocked=False, card=fake_card)
+        captured = {}
+        with patch.object(self.handler, "ocl_apply", return_value=fake_ocl), \
+             patch.object(self.handler.bench_handlers, "list_available_benches",
+                         side_effect=lambda a: captured.setdefault("args", a) or
+                                                '{"code": 200, "data": []}'):
+            self.handler._try_fast_path("查询 1.0 架构台架", "ou_user", "u@x.com", 1)
+        assert captured["args"] == {"architecture": "1.0架构"}
+
+    def test_l3_architecture_arg_built(self, monkeypatch):
+        fake_ocl = self.OclResult(text="", blocked=False, card={"elements": []})
+        captured = {}
+        with patch.object(self.handler, "ocl_apply", return_value=fake_ocl), \
+             patch.object(self.handler.bench_handlers, "list_available_benches",
+                         side_effect=lambda a: captured.setdefault("args", a) or
+                                                '{"code": 200, "data": []}'):
+            self.handler._try_fast_path("L3 架构的台架", "ou_user", "u@x.com", 1)
+        assert captured["args"] == {"architecture": "L3架构"}
+
+
+class TestFastPathErrorHandling:
+    """Errors in fast path must not break the bot — fall through to LLM."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+        from ocl.pipeline import OclResult
+        self.OclResult = OclResult
+
+    def test_tool_raises_returns_none(self, monkeypatch):
+        """If the bench handler raises, fast path returns None (LLM retries)."""
+        with patch.object(self.handler.bench_handlers, "list_available_benches",
+                         side_effect=RuntimeError("bench API down")):
+            out = self.handler._try_fast_path("查询可用台架", "ou_user", "u@x.com", 1)
+        assert out is None
+
+    def test_tool_returns_error_code_returns_text_not_card(self, monkeypatch):
+        """If tool returns code != 200, return a text result (not empty card)."""
+        error_result = json.dumps({"code": 500, "msg": "bench API temporarily unavailable"})
+        fake_ocl = self.OclResult(text="", blocked=False, card={"elements": []})
+        with patch.object(self.handler, "ocl_apply", return_value=fake_ocl), \
+             patch.object(self.handler.bench_handlers, "list_available_benches",
+                         return_value=error_result):
+            out = self.handler._try_fast_path("查询可用台架", "ou_user", "u@x.com", 1)
+        assert out is not None
+        assert out.card is None  # switched to text
+        assert "bench API temporarily unavailable" in out.text
+
+    def test_tool_returns_success_returns_card(self, monkeypatch):
+        """If tool returns code=200, return the OCL card."""
+        success = json.dumps({"code": 200, "data": ["TJ001", "TJ002"]})
+        fake_card = {"elements": [{"tag": "div", "text": {"content": "data"}}]}
+        fake_ocl = self.OclResult(text="", blocked=False, card=fake_card)
+        with patch.object(self.handler, "ocl_apply", return_value=fake_ocl), \
+             patch.object(self.handler.bench_handlers, "list_available_benches",
+                         return_value=success):
+            out = self.handler._try_fast_path("查询可用台架", "ou_user", "u@x.com", 1)
+        assert out is not None
+        assert out.card == fake_card

@@ -325,7 +325,8 @@ def test_full_happy_path_typing_then_streaming_then_card(monkeypatch, tmp_path):
     monkeypatch.setattr(handler.tool_capture, "read", lambda sid: [])
 
     # Run the handler
-    handler._handle(_make_event("查询可用台架", "ou_stream_user", "oc_stream_chat"))
+    # Use a non-fast-path query so the agent path is exercised end-to-end
+    handler._handle(_make_event("帮我看一下哪些台架是空闲的", "ou_stream_user", "oc_stream_chat"))
 
     # The stream_callback was actually passed to agent.chat
     assert captured_callback["cb"] is not None
