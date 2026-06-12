@@ -516,3 +516,60 @@ class TestReservationFastPath:
         assert self._try("我的预约") is None
         assert self._try("你好") is None
         assert self._try("") is None
+
+
+class TestReservationFastPathSavesDryRunState:
+    """After the fast path sends a dry_run confirm card, the next '确认'
+    text MUST hit _execute_confirmed_reserve (which fires dispatcher
+    notifications). The save must happen in the fast path itself,
+    because the LLM-driven capture loop is bypassed.
+    """
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+
+    def test_saves_dry_run_state_after_hit(self, monkeypatch):
+        from ocl.pipeline import OclResult
+        saved = {}
+        monkeypatch.setattr(self.handler, "dry_run_state", type("S", (), {
+            "save": lambda self, uid, args: saved.setdefault(uid, args),
+            "get": lambda self, uid: saved.get(uid),
+            "clear": lambda self, uid: saved.pop(uid, None),
+        })())
+        # fake dry_run returning a clean confirmation
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench",
+                          lambda a: json.dumps({"dry_run": True, "summary": "ok",
+                                                "args": a}))
+        monkeypatch.setattr(self.handler, "ocl_apply",
+            lambda resp, uid, captured=None: OclResult(text=resp, blocked=False, card={"ok": True}))
+        out = self.handler._try_reserve_fast_path(
+            "预约 TJ001 从明天下午3点到明天下午4点", "ou_x", "x@y.com")
+        assert out is not None
+        # dry_run_state was saved with the args
+        assert "ou_x" in saved
+        assert saved["ou_x"]["benchNo"] == "TJ001"
+
+    def test_subsequent_confirm_can_read_dry_run_state(self, monkeypatch):
+        """End-to-end: fast path → save → 确认 → confirm path picks it up."""
+        from ocl.pipeline import OclResult
+        # Fake dry_run_state
+        state = {}
+        monkeypatch.setattr(self.handler, "dry_run_state", type("S", (), {
+            "save": lambda self, uid, args: state.setdefault(uid, args),
+            "get": lambda self, uid: state.get(uid),
+            "clear": lambda self, uid: state.pop(uid, None),
+        })())
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench",
+                          lambda a: json.dumps({"dry_run": True, "summary": "ok",
+                                                "args": a}))
+        monkeypatch.setattr(self.handler, "ocl_apply",
+            lambda resp, uid, captured=None: OclResult(text=resp, blocked=False, card={"ok": True}))
+        # Step 1: user requests reservation
+        self.handler._try_reserve_fast_path(
+            "预约 TJ001 从明天下午3点到明天下午4点", "ou_x", "x@y.com")
+        # Step 2: user types "确认" — handler reads dry_run_state
+        pending = self.handler.dry_run_state.get("ou_x")
+        assert pending is not None
+        assert pending["benchNo"] == "TJ001"

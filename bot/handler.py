@@ -722,6 +722,19 @@ def _try_reserve_fast_path(text: str, user_id: str, email: str):
     log.info("reserve_fast_path hit user=%s bench=%s latency=%.0fms",
              user_id, bench_no, (time.monotonic() - t0) * 1000)
 
+    # Save dry_run_state so the user's next "确认" / "取消" reply hits the
+    # deterministic confirm path (bypasses LLM, runs reserve_bench for real,
+    # fires dispatcher notifications). Without this, the LLM path would be
+    # taken — but reserve_bench isn't in the LLM's toolset, so the
+    # reservation would silently never happen and no notification would fire.
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(parsed, dict) and parsed.get("dry_run") and not parsed.get("missing_fields"):
+            dry_run_state.save(user_id, parsed.get("args") or args)
+    except (json.JSONDecodeError, ValueError):
+        # If parse fails, fall back to the args we sent
+        dry_run_state.save(user_id, args)
+
     captured = [{"tool": "dry_run_reserve_bench", "result": raw}]
     return ocl_apply("请确认预约信息", user_id, captured=captured)
 
