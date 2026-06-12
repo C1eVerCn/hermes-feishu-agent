@@ -18,23 +18,27 @@ def mock_lark_response():
 
 
 def test_edit_message_uses_patch_endpoint_and_payload(mock_lark_response):
-    """edit_message must call im.v1.message.update (PATCH) with the new
-    text content in the body and the target message_id on the request."""
+    """edit_message must call im.v1.message.update (PATCH) with a CARD-shaped
+    body and the target message_id on the request.
+
+    Why card: Feishu's PATCH /im/v1/messages/{id} only supports updating
+    card (interactive) messages. Sending a text-shaped body returns
+    code 230001 "This message is NOT a card". The body therefore mirrors
+    the placeholder's card structure: config + a single text element."""
     with patch.object(sender._client.im.v1.message, "update",
                      return_value=mock_lark_response) as mock_update, \
          patch("time.sleep"):
         sender.edit_message("om_msg_456", "hello world")
-    # Assert the right endpoint was called with right args
     assert mock_update.call_count == 1
     req = mock_update.call_args[0][0]
-    # The request carries the target message_id (path param in the PATCH URL)
     assert req.message_id == "om_msg_456"
-    # Body carries the new content; the PATCH API only takes content
-    # (no receive_id, no msg_type — those are path/query-level)
     body = req.request_body
-    assert body.content is not None
     parsed = json.loads(body.content)
-    assert parsed == {"text": "hello world"}
+    # Card structure: top-level config + elements, with plain_text content
+    assert parsed["config"]["wide_screen_mode"] is True
+    assert parsed["elements"] == [
+        {"tag": "div", "text": {"tag": "plain_text", "content": "hello world"}},
+    ]
 
 
 def test_edit_message_retries_on_429(mock_lark_response):

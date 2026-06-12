@@ -21,9 +21,10 @@ def fresh_pool(monkeypatch):
 
 def test_warmup_thread_spawned_on_first_create(fresh_pool, monkeypatch):
     """When get_or_create creates a new AIAgent, it must spawn a background
-    thread that calls agent.chat('hello') to force hermes-agent lazy init."""
+    thread that calls agent._create_openai_client(...) to force the
+    OpenAI SDK lazy import (without making a real LLM call)."""
     fake_agent = MagicMock()
-    fake_agent.chat.return_value = "warmup ok"
+    fake_agent._client_kwargs = {"api_key": "test", "base_url": "http://x"}
     fake_thread = MagicMock()
     with patch("bot.agent_pool.AIAgent", return_value=fake_agent), \
          patch("threading.Thread", return_value=fake_thread) as mock_thread_cls:
@@ -42,6 +43,7 @@ def test_warmup_thread_spawned_on_first_create(fresh_pool, monkeypatch):
 def test_warmup_not_spawned_on_cache_hit(fresh_pool):
     """Second call to get_or_create (cache hit) must NOT spawn another thread."""
     fake_agent = MagicMock()
+    fake_agent._client_kwargs = {"api_key": "test", "base_url": "http://x"}
     with patch("bot.agent_pool.AIAgent", return_value=fake_agent), \
          patch("threading.Thread") as mock_thread_cls:
         fresh_pool.get_or_create("ou_user_1")  # first → spawns
@@ -51,11 +53,12 @@ def test_warmup_not_spawned_on_cache_hit(fresh_pool):
 
 
 def test_warmup_thread_swallows_exceptions(monkeypatch):
-    """If the warmup agent.chat raises, the background thread must not
-    propagate (daemon thread, no global state leak)."""
+    """If the warmup _create_openai_client raises, the background thread
+    must not propagate (daemon thread, no global state leak)."""
     agent_pool_mod.agent_pool._pool.clear()
     fake_agent = MagicMock()
-    fake_agent.chat.side_effect = RuntimeError("warmup boom")
+    fake_agent._client_kwargs = {"api_key": "test", "base_url": "http://x"}
+    fake_agent._create_openai_client.side_effect = RuntimeError("warmup boom")
     fake_thread = MagicMock()
     with patch("bot.agent_pool.AIAgent", return_value=fake_agent), \
          patch("threading.Thread", return_value=fake_thread):
@@ -64,6 +67,21 @@ def test_warmup_thread_swallows_exceptions(monkeypatch):
     # The thread.start() was called; warmup failure happens INSIDE that
     # thread and is swallowed (verified in _warmup_agent test below).
     assert fake_thread.start.call_count == 1
+
+
+def test_warmup_agent_calls_create_openai_client_not_chat():
+    """_warmup_agent must trigger SDK lazy import via _create_openai_client
+    (not agent.chat, which would make a real LLM call costing $$ and
+    pollute session history with a stray 'hello' turn)."""
+    fake_agent = MagicMock()
+    fake_agent._client_kwargs = {"api_key": "test", "base_url": "http://x"}
+    # Call _warmup_agent synchronously (not via the thread pool)
+    agent_pool_mod._warmup_agent(fake_agent)
+    fake_agent._create_openai_client.assert_called_once()
+    args, kwargs = fake_agent._create_openai_client.call_args
+    assert args[0] == {"api_key": "test", "base_url": "http://x"}
+    # chat() must NOT be called by warmup (it's a real LLM call)
+    fake_agent.chat.assert_not_called()
 
 
 # ── Streaming tests (Task 4: _on_streaming_chunk) ─────────────────────────

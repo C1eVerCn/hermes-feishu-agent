@@ -14,12 +14,25 @@ log = logging.getLogger(__name__)
 
 
 def _warmup_agent(agent) -> None:
-    """Background thread target. Forces hermes-agent's lazy import
-    (anthropic provider, tool registry, prompt template) by making one
-    no-op LLM call. Failures are logged and swallowed — the next user
-    message will re-trigger lazy init via the normal path, just slow."""
+    """Background thread target. Forces hermes-agent's lazy init —
+    OpenAI SDK import (240ms) + first client instantiation — without
+    making a real LLM call (which would cost $$ and pollute session
+    history with a stray "hello" turn).
+
+    `agent._create_openai_client` is the lazy-init chokepoint: the
+    OpenAI SDK is only imported on the first client creation, which
+    happens inside the first agent.chat() call. Pre-creating the
+    client here moves that cost off the critical path of the first
+    user message. The MCP client and tool registry are already
+    loaded by the AIAgent constructor.
+
+    Failures are logged and swallowed — the next user message will
+    fall back to the lazy-init path, just slow.
+    """
     try:
-        agent.chat("hello")
+        agent._create_openai_client(
+            agent._client_kwargs, reason="container_warmup", shared=True,
+        )
     except Exception:
         log.exception("agent_warmup_failed")
 

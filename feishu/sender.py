@@ -97,18 +97,18 @@ def send_card(chat_id: str, card: dict, max_retries: int = 3) -> None:
 
 def edit_message(message_id: str, content_text: str,
                 max_retries: int = 3) -> None:
-    """Update an existing Feishu message in place. Used by streaming to
-    append token updates to the typing placeholder bubble.
+    """Update an existing Feishu card message in place. Used by streaming
+    to append token updates to the typing placeholder bubble.
 
     Mirrors send_card's 429-retry + rate-limit pattern. Non-429 failures
     are logged and dropped (the next edit_message call will retry the
     whole stream; cumulative drop is acceptable for streaming UX).
 
-    No chat_id is needed: the Feishu PATCH /im/v1/messages/{message_id}
-    endpoint identifies the target via the message_id path parameter,
-    and the SDK's PatchMessageRequest / PatchMessageRequestBody builders
-    do not accept a receive_id or msg_type — only the new `content` body
-    field is needed.
+    The target must be a card (interactive) message — Feishu's PATCH
+    /im/v1/messages/{message_id} API only supports updating card messages;
+    plain text messages return code 230001 "This message is NOT a card".
+    The TypingIndicator placeholder is therefore a single-element card
+    whose text element is rewritten with the streaming token buffer.
     """
     global _last_send_time
     with _send_lock:
@@ -117,7 +117,15 @@ def edit_message(message_id: str, content_text: str,
             time.sleep(RATE_LIMIT_INTERVAL - elapsed)
         _last_send_time = time.monotonic()
 
-    content = json.dumps({"text": content_text}, ensure_ascii=False)
+    # Card structure mirrors the placeholder's shape so PATCH is consistent
+    # with the original message. wide_screen_mode keeps long token streams
+    # on a single line in narrow chat panels.
+    content = json.dumps({
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "div", "text": {"tag": "plain_text", "content": content_text}},
+        ],
+    }, ensure_ascii=False)
     for attempt in range(max_retries):
         req = PatchMessageRequest.builder() \
             .message_id(message_id) \

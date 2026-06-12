@@ -17,6 +17,19 @@ _client = lark.Client.builder() \
 PLACEHOLDER_TEXT = "⏳ 正在处理，请稍候..."
 THRESHOLD_SECONDS = 2.0
 
+# Card structure for the placeholder. We send a card (interactive) message
+# rather than a plain text message because Feishu's PATCH /im/v1/messages
+# API only supports updating card (interactive) messages — text messages
+# cannot be edited in place. The card has a single text element that
+# edit_message() rewrites with the streaming token buffer.
+def _card_payload(text: str) -> dict:
+    return {
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "div", "text": {"tag": "plain_text", "content": text}},
+        ],
+    }
+
 
 class TypingIndicator:
     """
@@ -56,8 +69,8 @@ class TypingIndicator:
             .request_body(
                 CreateMessageRequestBody.builder()
                 .receive_id(self._chat_id)
-                .msg_type("text")
-                .content(json.dumps({"text": PLACEHOLDER_TEXT}))
+                .msg_type("interactive")
+                .content(json.dumps(_card_payload(PLACEHOLDER_TEXT), ensure_ascii=False))
                 .build()
             ).build()
 
