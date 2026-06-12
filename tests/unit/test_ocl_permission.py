@@ -31,21 +31,21 @@ def test_unknown_user_role_is_zero():
  assert identity.role_of("ou_never_seen") ==0
 
 
-# TOOL_MIN_ROLE 配置正确性
+# TOOL_MIN_ROLE 配置正确性（2026-06-10 更新：role 1 包含除 VLM 同步外的全部工具）
 def test_tool_min_role_bench_tools():
  assert perm.TOOL_MIN_ROLE["list_architectures"] ==1
  assert perm.TOOL_MIN_ROLE["reserve_bench"] ==1
- assert perm.TOOL_MIN_ROLE["approve_reservation"] ==2
- assert perm.TOOL_MIN_ROLE["list_my_approvals"] ==2
+ assert perm.TOOL_MIN_ROLE["approve_reservation"] ==1
+ assert perm.TOOL_MIN_ROLE["list_my_approvals"] ==1
 
 
 def test_tool_min_role_vlm_tools():
- # 查询类→1
+ # 查询类 + 数据导出 → 1
  assert perm.TOOL_MIN_ROLE["list_event_names"] ==1
  assert perm.TOOL_MIN_ROLE["get_frame"] ==1
- # 下载元数据→2
- assert perm.TOOL_MIN_ROLE["download_bag_metadata"] ==2
- #同步控制→3
+ assert perm.TOOL_MIN_ROLE["download_bag_metadata"] ==1
+ assert perm.TOOL_MIN_ROLE["frame_image_url"] ==1
+ #同步控制 →3（唯一保留的 role 3 工具）
  assert perm.TOOL_MIN_ROLE["sync_execute"] ==3
  assert perm.TOOL_MIN_ROLE["trigger_sync_async"] ==3
  assert perm.TOOL_MIN_ROLE["sync_status"] ==3
@@ -53,13 +53,10 @@ def test_tool_min_role_vlm_tools():
 
 #核心门控逻辑
 def test_role1_user_can_use_level1_tools():
- for t in ["list_architectures", "reserve_bench", "list_event_names", "get_frame"]:
+ for t in ["list_architectures", "reserve_bench", "list_event_names", "get_frame",
+         "approve_reservation", "list_my_approvals",
+         "download_bag_metadata", "frame_image_url"]:
   assert perm.is_tool_permitted("ou_alice", t), f"role1 should access {t}"
-
-
-def test_role1_user_blocked_from_level2_tools():
- for t in ["approve_reservation", "list_my_approvals", "download_bag_metadata", "frame_image_url"]:
-  assert not perm.is_tool_permitted("ou_alice", t), f"role1 should NOT access {t}"
 
 
 def test_role1_user_blocked_from_level3_tools():
@@ -67,7 +64,7 @@ def test_role1_user_blocked_from_level3_tools():
   assert not perm.is_tool_permitted("ou_alice", t), f"role1 should NOT access {t}"
 
 
-def test_role2_user_can_use_level2_tools():
+def test_role2_user_can_use_level1_tools():
  for t in ["approve_reservation", "download_bag_metadata", "frame_image_url"]:
   assert perm.is_tool_permitted("ou_bob", t), f"role2 should access {t}"
 

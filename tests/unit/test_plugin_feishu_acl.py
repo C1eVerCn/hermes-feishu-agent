@@ -36,24 +36,15 @@ def test_role1_user_can_use_level1_bench_tool():
  assert hook(tool_name="list_my_reservations", session_id="feishu_ou_alice") is None
 
 
-def test_role1_user_blocked_from_level2_bench_tool():
- "approve_reservation 要求 role>=2，alice 是1，应该被拦截。"
- from ocl.session_map import register
- register("feishu_ou_alice", "ou_alice")
- hook = _load_hook()
- result = hook(tool_name="approve_reservation", session_id="feishu_ou_alice")
- assert result is not None
- assert result["action"] == "block"
- assert "权限不足" in result["message"]
-
-
 def test_role1_user_blocked_from_level3_vlm_tool():
  "sync_execute 要求 role=3，alice 是1，应该被拦截。"
  from ocl.session_map import register
  register("feishu_ou_alice", "ou_alice")
  hook = _load_hook()
  result = hook(tool_name="sync_execute", session_id="feishu_ou_alice")
+ assert result is not None
  assert result["action"] == "block"
+ assert "权限不足" in result["message"]
 
 
 #调度员 (role=2)

@@ -35,6 +35,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from infra.json_store import JsonStore
+
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
 
@@ -67,41 +69,46 @@ class IdentityAdmin:
     def __init__(self, map_file, audit_file):
         self._map_file = Path(map_file)
         self._audit_file = Path(audit_file)
-        self._map_file.parent.mkdir(parents=True, exist_ok=True)
         self._audit_file.parent.mkdir(parents=True, exist_ok=True)
+        # BUGFIX (#7): delegate atomic JSON persistence to infra.json_store.
+        # The raw `with open(...) / json.dump / os.replace` pattern was
+        # previously re-implemented here as a third copy.
+        self._store = JsonStore(str(self._map_file))
         self._data = self._load()
 
     def _load(self):
-        if not self._map_file.exists():
+        # v1→v2 migration is applied in-memory each load; on a v1 file the
+        # resulting v2 data is persisted by the next `_save` call.
+        raw = self._store.all() or {}
+        if not isinstance(raw, dict):
+            log.warning("identity_load_unexpected_type type=%s", type(raw).__name__)
             return {}
-        try:
-            with open(self._map_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                # 兼容 v1 (open_id → int) 与 v2 (open_id → dict)
-                normalized = {}
-                for k, v in data.items():
-                    if isinstance(v, int):
-                        normalized[k] = {
-                            "email": "",
-                            "name": "",
-                            "role": v,
-                            "registered_at": "",
-                            "registered_via": "manual",
-                            "note": "migrated_from_v1",
-                        }
-                    elif isinstance(v, dict):
-                        normalized[k] = v
-                return normalized
-        except Exception as e:
-            log.warning("identity_load_failed err=%s", e)
-        return {}
+        return self._migrate_v1_to_v2(raw)
+
+    @staticmethod
+    def _migrate_v1_to_v2(data: dict) -> dict:
+        """Migrate v1 (open_id → int) records to v2 (open_id → dict) records.
+        Idempotent: returns the input untouched when no v1 entries are present."""
+        has_v1 = any(isinstance(v, int) for v in data.values())
+        if not has_v1:
+            return data
+        normalized = {}
+        for k, v in data.items():
+            if isinstance(v, int):
+                normalized[k] = {
+                    "email": "",
+                    "name": "",
+                    "role": v,
+                    "registered_at": "",
+                    "registered_via": "manual",
+                    "note": "migrated_from_v1",
+                }
+            elif isinstance(v, dict):
+                normalized[k] = v
+        return normalized
 
     def _save(self):
-        tmp_path = self._map_file.with_suffix(".json.tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, self._map_file)
+        self._store.set_all(self._data)
 
     def _audit(self, op, open_id, before, after, operator="system", note=""):
         record = {

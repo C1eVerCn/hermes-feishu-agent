@@ -55,8 +55,7 @@ OCL 按 min_role粗粒度门控工具；后端按 emailAddress细粒度校验（
 
 | Min role | 台架预约工具 | VLM精标工具 |
 |----------|----------|----------|
-|1 | list_architectures, list_available_benches, reserve_bench, cancel_reservation, return_bench, list_my_reservations | list_event_names, list_camera_types, list_bags, get_bag, list_frames, get_frame, playback_bag |
-|2 | approve_reservation, list_my_approvals | download_bag_metadata, frame_image_url |
+|1 | list_architectures, list_available_benches, reserve_bench, cancel_reservation, return_bench, list_my_reservations, approve_reservation, list_my_approvals | list_event_names, list_camera_types, list_bags, get_bag, list_frames, get_frame, playback_bag, download_bag_metadata, frame_image_url |
 |3 | — | sync_execute, trigger_sync_async, sync_status |
 
 管理员在飞书里指派角色：`设置角色 <open_id> <1|2|3>`。无自助申请流程。

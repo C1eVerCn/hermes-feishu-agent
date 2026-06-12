@@ -21,19 +21,21 @@ log = logging.getLogger(__name__)
 
 
 # ──工具 →所需最低角色（1=普通 /2=调度员 /3=管理员） ────────────────────
+# 2026-06-10 权限放宽：role 1 包含除"系统级 VLM 同步"外的全部工具；
+# "添加/删除台架" 不在本系统（无对应工具），按用户原意排除。
 TOOL_MIN_ROLE: dict[str, int] = {
- # ── 台架预约（mock_api模拟） ──
- "list_architectures":1,
- "list_available_benches":1,
- "reserve_bench":1,
- "cancel_reservation":1,
- "return_bench":1,
- "list_my_reservations":1,
- "approve_reservation":2, #调度员/管理员审批
- "list_my_approvals":2, #调度员/管理员查看待审批
+ # ── 台架预约 ──
+ "list_architectures":1,        # 查询架构
+ "list_available_benches":1,    # 查询可用台架
+ "dry_run_reserve_bench":1,     # 预约确认卡（永远 dry；LLM 唯一可调的预约入口）
+ "reserve_bench":1,             # 真实预约（不暴露给 LLM，仅 card callback 可调）
+ "cancel_reservation":1,        # 取消
+ "return_bench":1,              # 归还
+ "list_my_reservations":1,      # 我的预约
+ "approve_reservation":1,       # 审批（role 1 起，跨组能力由后端 emailAddress 校验）
+ "list_my_approvals":1,         # 待审批列表
 
- # ── VLM精标（真实 dmz-ess-vlm API） ──
- #纯查询类：普通用户可用
+ # ── VLM 精标（真实 dmz-ess-vlm API） ──
  "list_event_names":1,
  "list_camera_types":1,
  "list_bags":1,
@@ -41,10 +43,9 @@ TOOL_MIN_ROLE: dict[str, int] = {
  "list_frames":1,
  "get_frame":1,
  "playback_bag":1,
- # 数据导出（可能下载大量数据）：调度员起
- "download_bag_metadata":2,
- "frame_image_url":2,
- #同步/系统控制：仅管理员
+ "download_bag_metadata":1,     # 数据导出
+ "frame_image_url":1,
+ #同步/系统控制：仅管理员（系统级操作，与业务查询/数据访问分离）
  "sync_execute":3,
  "trigger_sync_async":3,
  "sync_status":3,

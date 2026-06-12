@@ -31,11 +31,14 @@ def test_cancel_calls_handler_and_returns_toast():
 
 
 def test_approve_by_normal_user_blocked_by_ocl():
- """OCL Layer2拦截 — approve_reservation 要求 role>=2，普通用户(role=1) 直接被拒绝。"""
+ """OCL Layer2拦截 — approve_reservation 现在 role=1 即可用。
+ 验证：未注册用户 (role=0) 调 approve → 拦截。
+ """
  patcher = patch.object(cah.handlers, "approve_reservation", return_value='{"code":200,"message":"ok","data":null}')
  m = patcher.start()
- toast, card = cah.handle("ou_user", {"action": "approve", "benchNo": "TJ001", "approvalResult":1})
- assert "权限不足" in toast or "权限" in toast
+ # ou_ghost 不在 identity_map → role=0 → 拒绝
+ toast, card = cah.handle("ou_ghost", {"action": "approve", "benchNo": "TJ001", "approvalResult":1})
+ assert "权限不足" in toast or "权限" in toast or "平台用户" in toast
  assert m.call_count ==0
  patcher.stop()
 

@@ -153,3 +153,70 @@ def test_only_markers_after_strip_is_blocked():
     result = fc.apply("新消息\n---\n新会话")
     assert result.blocked
     assert result.block_reason == "empty_after_strip"
+
+
+# ── "建议：" reasoning-block stripping (added 2026-06-10 — quality fix) ──────
+
+def test_strips_numbered_suggestion_block():
+    """minimax-M3 sometimes emits CoT-style '**建议：**\\n1.\\n2.' after a
+    failed tool call. Replace the whole block with one fallback sentence."""
+    text = (
+        "TJ001 在可用台架列表中，确实可预约。\n"
+        "但预约调用失败了。\n\n"
+        "**建议：**\n"
+        "1. 重试一次预约请求（可能工具参数偶发问题）\n"
+        "2. 如果仍失败，说明系统可能需要你重新发起请求\n"
+    )
+    result = fc.apply(text)
+    assert "建议" not in result.text
+    assert "重试一次" not in result.text
+    assert "请联系管理员" in result.text
+
+
+def test_strips_unbolded_suggestion_block():
+    """Suggestion heading without **...** bold wrapper still stripped."""
+    text = "失败原因：参数缺失。\n建议：\n1. 检查台架编号\n2. 重试"
+    result = fc.apply(text)
+    assert "检查台架编号" not in result.text
+    assert "请联系管理员" in result.text
+
+
+def test_does_not_strip_single_item_suggestion():
+    """A single numbered line is not a CoT leak — must NOT be touched."""
+    text = "已批准 1 条预约。\n建议：留意后续通知。"
+    result = fc.apply(text)
+    # Single item: leave alone
+    assert "建议" in result.text
+    assert "留意后续通知" in result.text
+
+
+def test_strips_bullet_list_suggestion_block():
+    """The bullet-list variant: '**建议：**\\n- foo\\n- bar' must also be stripped.
+    (Earlier regex only handled numbered lists and let this leak through.)"""
+    text = (
+        "CT001 架构当前没有可用台架，无法预约。建议：\n"
+        "- 换用其他架构（如 CT002、CT003 等）再次查询\n"
+        "- 或联系调度员确认 CT001 是否有可用台架\n"
+        "\n当前没有可用台架。"
+    )
+    result = fc.apply(text)
+    assert "换用其他架构" not in result.text
+    assert "联系调度员" not in result.text
+    assert "请联系管理员" in result.text
+
+
+def test_midline_suggestion_keeps_meaningful_prefix():
+    """When '建议：' appears mid-line after meaningful content, the prefix
+    must be preserved — only the heading + list items are the CoT leak.
+    (Regression: review fix #2 — previously the whole line was discarded.)"""
+    text = (
+        "CT001 架构当前没有可用台架，无法预约。建议：\n"
+        "- 换用其他架构再次查询\n"
+        "- 或联系调度员\n"
+        "\n当前没有可用台架。"
+    )
+    result = fc.apply(text)
+    assert "无法预约" in result.text          # meaningful prefix kept
+    assert "换用其他架构" not in result.text   # suggestion items stripped
+    assert "联系调度员" not in result.text
+    assert "请联系管理员" in result.text       # fallback present

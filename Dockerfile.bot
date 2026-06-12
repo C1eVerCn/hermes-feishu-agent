@@ -1,0 +1,65 @@
+# Dockerfile.bot — DMZ 飞书 bot 容器化镜像
+# 用途：本地 dev / 演示。生产 ECS 部署用 /Users/chris/IM/DMZ_Agent_HERMES/Dockerfile.agent（不混用）。
+#
+# 容器内：
+#   - /app 是工作目录，所有 Python 包（bot/ feishu/ ocl/ bench_tools/ ...）从这里 import
+#   - /app/data 留作 host 挂载点（identity_map.json 等可变数据）
+#   - .env 通过 docker compose 的 env_file 挂入（不烧进 image）
+#
+# 网络：
+#   - 必须加入 docker_fmp-net，才能用 fmp-app:9013 调到 fmp 后端
+#   - 在 docker-compose.bot.yml 里 networks 配置
+#
+# 依赖装法说明：直接 `pip install <包名>` 不走本地 build（避免 hatchling 等
+# build-deps 解析不到 PyPI 而失败）。本镜像不调 `pip install -e .`，把源码
+# COPY 进去后 python 直接 import 各包即可（项目无 C 扩展，无需编译）。
+FROM python:3.14-slim
+
+WORKDIR /app
+
+# 运行时依赖（取自 pyproject.toml [project.dependencies]）
+# 注：hermes-agent 包很大（~10MB），docker build 网络偶发 IncompleteRead；给足
+# timeout + 多次重试，并允许拆单下载分次重试
+# 注 2：anthropic 单独预装——hermes-agent 用 minimax provider 时会通过 tools.lazy_deps
+# 触发 `pip install anthropic==0.87.0`（约 30+ 秒），但 minimax 走的是 anthropic 协议，
+# 提前装好可省掉首次消息的冷启动延迟
+RUN pip install --no-cache-dir \
+    --timeout 300 \
+    --retries 5 \
+    "hermes-agent" \
+    "lark-oapi>=1.0" \
+    "fastapi>=0.110" \
+    "uvicorn>=0.29" \
+    "python-dotenv>=1.0" \
+    "pydantic>=2.0" \
+    "httpx>=0.27" \
+    "python-jose[cryptography]>=3.3" \
+    "anthropic==0.87.0"
+
+# dev 依赖（取自 pyproject.toml [project.optional-dependencies].dev）
+RUN pip install --no-cache-dir \
+    --timeout 300 \
+    --retries 5 \
+    "pytest>=8.0" \
+    "pytest-asyncio>=0.23" \
+    "freezegun>=1.4"
+
+# 复制源码（各包纯 Python，无 C 扩展，无需 build）
+COPY main.py ./
+COPY bot/ ./bot/
+COPY feishu/ ./feishu/
+COPY ocl/ ./ocl/
+COPY bench_tools/ ./bench_tools/
+COPY vlm_tools/ ./vlm_tools/
+COPY hermes_plugins/ ./hermes_plugins/
+COPY infra/ ./infra/
+COPY config/ ./config/
+
+# 确保 data/ 目录存在（identity_map.json 通过 volume 挂载进来）
+RUN mkdir -p /app/data
+
+# /health 端点
+EXPOSE 8088
+
+# -u: unbuffered（让 log 立即到 stdout → docker logs）
+ENTRYPOINT ["python3", "-u", "main.py"]

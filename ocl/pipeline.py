@@ -46,7 +46,11 @@ def apply(response: str, user_id: str, captured: list[dict] | None = None) -> Oc
         # 3. Length limit
         text = length_limiter.apply(text)
 
-        # 4. Interactive card (deterministic data from captured tool results)
+        # 4. Interactive card — ALWAYS built. User-facing requirement 2026-06-10:
+        # every LLM reply renders as a card, even when no tool ran. Keeps
+        # visual style consistent with intent-path replies (which use
+        # sender.send_text_as_card). Empty/short text still produces a valid
+        # single-element card.
         card = card_builder.build_card(text, captured)
 
         return OclResult(text=text, blocked=False, card=card)

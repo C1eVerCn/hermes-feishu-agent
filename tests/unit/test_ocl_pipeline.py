@@ -98,6 +98,20 @@ def test_apply_blocked_has_no_card():
 
 
 def test_apply_plain_text_still_builds_card_without_action():
-    res = pipeline.apply("**你好**", "ou_x", captured=[])
+    """Plain text WITH structured captured data → card (no buttons expected
+    when the captured entry isn't a reservation/approval)."""
+    res = pipeline.apply("**你好**", "ou_x", captured=[
+        {"tool": "list_available_benches", "result": {"code": 200, "data": ["TJ001"]}}
+    ])
     assert res.card is not None
     assert all(e.get("tag") != "action" for e in res.card["elements"])
+
+
+def test_apply_always_builds_card_even_without_captured():
+    """User-facing requirement 2026-06-10: every LLM reply renders as a card,
+    even when no tool ran. Empty captured → single-element card."""
+    res = pipeline.apply("**你好**", "ou_x", captured=[])
+    assert res.card is not None
+    # Single-element card: text div only, no buttons / hr / data block
+    assert len(res.card["elements"]) == 1
+    assert res.card["elements"][0]["tag"] == "div"

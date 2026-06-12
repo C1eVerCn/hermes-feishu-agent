@@ -26,6 +26,9 @@ _email_cache: dict[str, str] = {}
 _name_cache: dict[str, str] = {}
 # 负向缓存：尝试解析过但没有结果的 open_id
 _miss_cache: set[str] = set()
+# 反向索引：email → open_id（从 identity_map.json v2 schema 扫出来）
+# 用于 Feishu v3 不支持 email→open_id lookup 时本地直查
+_email_to_oid_cache: dict[str, str] = {}
 
 # ── role overrides from identity_map.json ─────────────────────────────────
 _role_overrides: dict[str, int] = {}
@@ -38,10 +41,14 @@ _client: lark.Client | None = None
 def _get_client() -> lark.Client:
     global _client
     if _client is None:
+        # timeout 单位秒——之前 lark SDK 默认 ~6s × retries=3 ≈ 30s+，
+        # 容器内偶发 DNS 抖动会被 urllib3 放大成 30s+ 卡顿
+        # 把单次调用卡到 2s：失败立即进 negative cache，后续消息不重试
         _client = (
             lark.Client.builder()
             .app_id(settings.FEISHU_APP_ID)
             .app_secret(settings.FEISHU_APP_SECRET)
+            .timeout(2.0)
             .build()
         )
     return _client
@@ -59,6 +66,12 @@ def _load_role_overrides() -> dict[str, int]:
             for k, v in data.items():
                 if isinstance(v, dict):
                     _role_overrides[k] = v.get("role", 0)
+                    # 同时建反向 email → open_id 索引，绕过 Feishu v3 不支持的
+                    # email→open_id lookup（99992402 field validation failed）。
+                    # 来源：管理员手动设置的 admin_assign 条目（如 chenyihang）
+                    email = v.get("email") or ""
+                    if email and email not in _email_to_oid_cache:
+                        _email_to_oid_cache[email] = k
                 elif isinstance(v, int):
                     _role_overrides[k] = v
     except Exception:
@@ -70,6 +83,7 @@ def _load_role_overrides() -> dict[str, int]:
 def _invalidate_role_overrides() -> None:
     global _role_overrides_loaded
     _role_overrides.clear()
+    _email_to_oid_cache.clear()
     _role_overrides_loaded = False
 
 
@@ -129,6 +143,22 @@ def name_of(open_id: str) -> str:
         return ""
     with _lock:
         return _name_cache.get(open_id, "")
+
+
+def open_id_of(email: str) -> str:
+    """Reverse lookup: email → open_id.
+
+    Reads the local index built from identity_map.json v2 schema
+    (admin-assigned records carry an `email` field). Avoids the
+    Feishu v3 BatchGetIdUser API which rejects `user_id_type=email`
+    with code 99992402. Returns "" if email is unknown locally —
+    the caller (notify) can then fall through to other strategies.
+    """
+    if not email:
+        return ""
+    _load_role_overrides()  # ensures _email_to_oid_cache is populated
+    with _lock:
+        return _email_to_oid_cache.get(email, "")
 
 
 def role_of(open_id: str) -> int:

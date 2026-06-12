@@ -86,9 +86,10 @@ def test_guarded_handler_blocks_unknown_tool():
  assert result != "should not run"
 
 
-def test_guarded_blocks_role1_from_level2_tool():
-# role=1 用户调 approve_reservation（level=2）→ Layer2拦截
- guard.set_current_user("ou_alice")
+def test_guarded_blocks_unregistered_user_from_any_tool():
+# 2026-06-10：role=1 现在能调 approve_reservation（与之前不同）。
+# 验证：未注册用户 (role=0) 调任何已知工具 → Layer2 拦截。
+ guard.set_current_user("ou_ghost")  # 不在 identity_map 中 → role=0
  inner = lambda args: "should not run"
  wrapped = guard.guarded("approve_reservation", inner)
  result = wrapped({})

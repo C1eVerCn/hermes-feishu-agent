@@ -23,9 +23,10 @@ def test_on_card_action_delegates_and_returns_toast():
     import feishu.ws_client as ws
     captured = {}
 
-    def fake_handle(open_id, value):
+    def fake_handle(open_id, value, chat_id=""):
         captured["open_id"] = open_id
         captured["value"] = value
+        captured["chat_id"] = chat_id
         return "取消预约成功", None
 
     ws.set_card_action_handler(fake_handle)

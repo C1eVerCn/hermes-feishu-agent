@@ -373,8 +373,12 @@ def _do_post_reserve_actions(chat_id: str, user_id: str, email: str,
     sender.send_text_as_card(chat_id, applicant_text)
 
     rid = _cah._find_reservation_id(bench_no, start, end, email)
-    if rid:
-        reservation_store.save(rid, user_id, email, bench_no, start, end, task)
+    # Persist regardless of whether the backend id lookup succeeded: the
+    # approval-notification lookup keys by (benchNo, startTime), NOT by id,
+    # so an empty/failed _find_reservation_id must not silently disable the
+    # whole notify-on-approval feature. Fall back to a synthetic key.
+    key = rid or f"bt|{bench_no}|{start}|{end}"
+    reservation_store.save(key, user_id, email, bench_no, start, end, task)
 
 
 def _execute_confirmed_reserve(chat_id: str, user_id: str, email: str,

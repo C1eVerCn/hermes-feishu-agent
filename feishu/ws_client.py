@@ -24,7 +24,12 @@ event_queue: queue.Queue = queue.Queue(maxsize=1000)
 ws_connected = threading.Event()
 
 # Card-action callback, injected by main.py (keeps feishu/ free of bot/ imports).
-# Signature: (open_id: str, value: dict) -> tuple[str, dict | None]  (toast_text, updated_card)
+# Signature: (open_id: str, value: dict, chat_id: str) -> tuple[str, dict | None]
+# (toast_text, updated_card). chat_id is the chat the card was sent in
+# (operator's open_id for DM cards, oc_xxx for room cards). Currently passed
+# for logging/diagnostics; the handler replies via the returned toast/card,
+# not by sending to chat_id. Kept in the signature so a future
+# send-extra-message flow can use it without re-plumbing the WS layer.
 _card_action_handler = None
 
 
@@ -51,11 +56,20 @@ def _on_message(data: P2ImMessageReceiveV1) -> None:
 
 
 def _extract_card_action(data: P2CardActionTrigger):
-    """从 lark卡片动作事件中取 (open_id, value)。"""
+    """从 lark卡片动作事件中取 (open_id, value, chat_id).
+
+    chat_id comes from `context.open_chat_id` — the chat where the card was
+    sent (operator's open_id for DM cards, oc_xxx for room cards). Currently
+    used for logging/diagnostics only.
+    """
     op = data.event.operator
     open_id = getattr(op, "open_id", "") or ""
     value = getattr(data.event.action, "value", None) or {}
-    return open_id, value
+    ctx = getattr(data.event, "context", None)
+    chat_id = getattr(ctx, "open_chat_id", "") or ""
+    log.info("card_action_received open_id=%s chat_id=%s value_keys=%s",
+             open_id, chat_id, list(value.keys()) if isinstance(value, dict) else None)
+    return open_id, value, chat_id
 
 
 def _build_card_action_response(toast_text: str, updated_card):
@@ -74,11 +88,11 @@ def _toast_text(resp) -> str:
 def _on_card_action(data: P2CardActionTrigger):
     """同步卡片回调：执行确定性动作，返回 toast。"""
     try:
-        open_id, value = _extract_card_action(data)
+        open_id, value, chat_id = _extract_card_action(data)
         if _card_action_handler is None:
             toast_text, updated_card = "操作处理未就绪，请稍后重试", None
         else:
-            toast_text, updated_card = _card_action_handler(open_id, value)
+            toast_text, updated_card = _card_action_handler(open_id, value, chat_id)
     except Exception:
         log.exception("card action handling failed")
         toast_text, updated_card = "操作处理失败，请稍后重试", None
