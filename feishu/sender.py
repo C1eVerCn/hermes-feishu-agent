@@ -38,6 +38,21 @@ def send(chat_id: str, text: str) -> None:
             time.sleep(RATE_LIMIT_INTERVAL)
 
 
+def send_text_as_card(chat_id: str, text: str) -> None:
+    """Wrap plain text as a single-element interactive card and send.
+
+    Used by bot/handler.py for intent-path replies (greetings, identity query,
+    admin commands, error messages) so every user-visible message renders as
+    a card — consistent visual style across all paths.
+    """
+    card = {
+        "config": {"wide_screen_mode": True},
+        "elements": [{"tag": "div",
+                      "text": {"tag": "lark_md", "content": text}}],
+    }
+    send_card(chat_id, card)
+
+
 def send_to_user(open_id: str, text: str) -> None:
     """按 open_id 给用户发私信。"""
     chunks = _chunk_text(text)
@@ -78,6 +93,48 @@ def send_card(chat_id: str, card: dict, max_retries: int = 3) -> None:
         log.error("Feishu send_card failed: code=%s msg=%s", resp.code, resp.msg)
         return
     log.error("Feishu send_card failed after %d retries for chat_id=%s", max_retries, chat_id)
+
+
+def edit_message(chat_id: str, message_id: str, content_text: str,
+                max_retries: int = 3) -> None:
+    """Update an existing Feishu message in place. Used by streaming to
+    append token updates to the typing placeholder bubble.
+
+    Mirrors send_card's 429-retry + rate-limit pattern. Non-429 failures
+    are logged and dropped (the next edit_message call will retry the
+    whole stream; cumulative drop is acceptable for streaming UX).
+
+    Note: the Feishu PATCH /im/v1/messages/{message_id} endpoint does not
+    require receive_id (the target is the message_id) nor msg_type (the
+    message type is fixed at create time); only the new `content` body
+    field is needed.
+    """
+    global _last_send_time
+    with _send_lock:
+        elapsed = time.monotonic() - _last_send_time
+        if elapsed < RATE_LIMIT_INTERVAL:
+            time.sleep(RATE_LIMIT_INTERVAL - elapsed)
+        _last_send_time = time.monotonic()
+
+    content = json.dumps({"text": content_text}, ensure_ascii=False)
+    for attempt in range(max_retries):
+        req = PatchMessageRequest.builder() \
+            .message_id(message_id) \
+            .request_body(
+                PatchMessageRequestBody.builder()
+                .content(content)
+                .build()
+            ).build()
+        resp = _client.im.v1.message.update(req)
+        if resp.success():
+            return
+        if resp.code == 429:
+            time.sleep(2 ** attempt)
+            continue
+        log.error("Feishu edit_message failed: code=%s msg=%s", resp.code, resp.msg)
+        return
+    log.error("Feishu edit_message failed after %d retries for msg_id=%s",
+              max_retries, message_id)
 
 
 def _send_one(chat_id: str, text: str, max_retries: int = 3) -> None:
