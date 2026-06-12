@@ -287,3 +287,70 @@ class TestFastPathErrorHandling:
             out = self.handler._try_fast_path("查询可用台架", "ou_user", "u@x.com", 1)
         assert out is not None
         assert out.card == fake_card
+
+
+class TestFastPathSummary:
+    """Summary text must be non-empty or OCL format_control returns
+    _EMPTY_MESSAGE ('抱歉，未能生成有效回复'). The summary mirrors the
+    one-line + next-step format the LLM is expected to write.
+    """
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+
+    def test_summary_contains_count_for_benches(self):
+        s = self.handler._fast_path_summary(
+            "list_available_benches", {"code": 200, "data": ["TJ001", "TJ002", "TJ003"]})
+        assert "3" in s
+        assert "可用台架" in s
+
+    def test_summary_for_empty_bench_list(self):
+        s = self.handler._fast_path_summary(
+            "list_available_benches", {"code": 200, "data": []})
+        assert "0" in s
+        assert "可用台架" in s
+
+    def test_summary_contains_architecture_names(self):
+        s = self.handler._fast_path_summary(
+            "list_architectures", {"code": 200, "data": ["1.0架构", "1.5架构", "L3架构"]})
+        assert "1.0架构" in s
+        assert "L3架构" in s
+
+    def test_summary_contains_count_for_reservations(self):
+        s = self.handler._fast_path_summary(
+            "list_my_reservations", {"code": 200, "data": [{}, {}]})
+        assert "2" in s
+        assert "预约" in s
+
+    def test_summary_contains_count_for_approvals(self):
+        s = self.handler._fast_path_summary(
+            "list_my_approvals", {"code": 200, "data": [{}]})
+        assert "1" in s
+        assert "待审批" in s
+
+    def test_summary_falls_back_gracefully(self):
+        s = self.handler._fast_path_summary("unknown_tool", {"code": 200})
+        assert s  # non-empty
+        assert "查询" in s
+
+    def test_success_response_passes_non_empty_summary_to_ocl(self, monkeypatch):
+        """Verify the success path passes a non-empty summary to ocl_apply,
+        so OCL doesn't return _EMPTY_MESSAGE."""
+        from ocl.pipeline import OclResult
+        captured_summary = {}
+        def fake_apply(response, user_id, captured=None):
+            captured_summary["response"] = response
+            return OclResult(text=response, blocked=False,
+                             card={"elements": [{"tag": "div", "text": {"content": "data"}}]})
+        monkeypatch.setattr(self.handler, "ocl_apply", fake_apply)
+        success = json.dumps({"code": 200, "data": ["TJ001"]})
+        with patch.object(self.handler.bench_handlers, "list_available_benches",
+                         return_value=success):
+            out = self.handler._try_fast_path("查询可用台架", "ou_user", "u@x.com", 1)
+        # Summary is non-empty (would be passed to OCL as "response")
+        assert captured_summary["response"], "OCL must receive a non-empty summary"
+        assert "1" in captured_summary["response"]
+        assert out is not None
+        assert out.card is not None

@@ -578,23 +578,53 @@ def _try_fast_path(text: str, user_id: str, email: str, role: int):
                  tool_name, user_id, latency_ms)
         metrics.inc("fast_path_hits")
 
-        # Build the captured entry as if the LLM had called the tool.
-        # card_builder reads this to render the structured card.
+        # Parse the tool result to decide summary text + check for errors
+        try:
+            parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+        except (json.JSONDecodeError, ValueError):
+            parsed = {}
+
+        # Error path: tool returned code != 200 → return a text reply
+        # (not an empty card) so the user sees what went wrong.
+        if not isinstance(parsed, dict) or parsed.get("code") != 200:
+            from ocl.pipeline import OclResult
+            err = (parsed or {}).get("msg") if isinstance(parsed, dict) else None
+            return OclResult(text=err or _ERROR_REPLY, blocked=False, card=None)
+
+        # Success path: build a short summary text + captured entry.
+        # The summary is what ocl.pipeline sees as "the LLM's text" —
+        # it must be non-empty or format_control will block with the
+        # _EMPTY_MESSAGE ("未能生成有效回复"). card_builder then combines
+        # the summary with the captured data to render the actual card.
+        summary = _fast_path_summary(tool_name, parsed)
         captured = [{"tool": tool_name, "result": raw_result}]
-        ocl_result = ocl_apply("", user_id, captured=captured)
-        # If the tool returned an error, prefer the error text over an
-        # empty card (OCL's empty-text + non-200 captured produces a
-        # blank-looking card).
-        if ocl_result.card is not None:
-            try:
-                parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-                if isinstance(parsed, dict) and parsed.get("code") != 200:
-                    err_text = parsed.get("msg") or _ERROR_REPLY
-                    return ocl_result.__class__(text=err_text, blocked=False, card=None)
-            except (json.JSONDecodeError, ValueError):
-                pass
-        return ocl_result
+        return ocl_apply(summary, user_id, captured=captured)
     return None
+
+
+def _fast_path_summary(tool_name: str, parsed: dict) -> str:
+    """Build a short summary line for the OCL card. Mirrors what the LLM
+    would have written (one line + "next-step hint" per the system prompt).
+    The card_builder then adds the data block + any interactive buttons.
+
+    The summary must be non-empty (format_control blocks empty input).
+    """
+    data = parsed.get("data")
+    if tool_name == "list_available_benches":
+        n = len(data) if isinstance(data, list) else 0
+        return f"📋 当前可用台架共 {n} 个（详见下方列表）。"
+    if tool_name == "list_architectures":
+        if isinstance(data, list):
+            names = "、".join(str(x) for x in data[:10])
+            return f"📋 台架架构：{names}。"
+        return "📋 台架架构列表已就绪。"
+    if tool_name == "list_my_reservations":
+        n = len(data) if isinstance(data, list) else 0
+        return f"📋 您当前有 {n} 条预约记录。"
+    if tool_name == "list_my_approvals":
+        n = len(data) if isinstance(data, list) else 0
+        return f"📋 您当前有 {n} 条待审批记录。"
+    return "📋 查询成功。"
 
 
 def _extract_text(msg) -> str:
