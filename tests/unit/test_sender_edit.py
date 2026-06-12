@@ -66,3 +66,28 @@ def test_edit_message_swallows_non_429_failure():
     assert mock_update.call_count == 1
     # Logged as error
     assert any("edit_message failed" in str(c) for c in mock_log.error.call_args_list)
+
+
+def test_typing_indicator_edit_message_calls_sender_edit_message():
+    """TypingIndicator.edit_message proxies to sender.edit_message with the
+    stored placeholder_message_id."""
+    import feishu.typing_indicator as ti
+
+    indicator = ti.TypingIndicator("oc_chat_123")
+    indicator._placeholder_message_id = "om_msg_456"  # simulate timer fired
+
+    with patch("feishu.sender.edit_message") as mock_edit:
+        indicator.edit_message("partial response...")
+    mock_edit.assert_called_once_with("om_msg_456", "partial response...")
+
+
+def test_typing_indicator_edit_message_noop_when_no_placeholder():
+    """If placeholder wasn't sent (timer didn't fire yet), edit_message is a noop."""
+    import feishu.typing_indicator as ti
+
+    indicator = ti.TypingIndicator("oc_chat_123")
+    indicator._placeholder_message_id = None  # placeholder not sent
+
+    with patch("feishu.sender.edit_message") as mock_edit:
+        indicator.edit_message("anything")
+    mock_edit.assert_not_called()

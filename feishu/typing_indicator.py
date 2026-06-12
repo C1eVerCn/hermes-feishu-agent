@@ -35,9 +35,20 @@ class TypingIndicator:
         self._timer.start()
 
     def stop(self) -> None:
+        # Don't delete the placeholder: Feishu IM has no delete-message API.
+        # The placeholder stays as the streaming target, then gets covered
+        # by edit_message into the final response.
         if self._timer:
             self._timer.cancel()
             self._timer = None
+
+    def edit_message(self, content_text: str) -> None:
+        """Update the placeholder bubble in place with new text. Noop if
+        the placeholder wasn't sent (timer didn't fire yet)."""
+        if self._placeholder_message_id is None:
+            return
+        from feishu import sender
+        sender.edit_message(self._placeholder_message_id, content_text)
 
     def _send_placeholder(self) -> None:
         req = CreateMessageRequest.builder() \
