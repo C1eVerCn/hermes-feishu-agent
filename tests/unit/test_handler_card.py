@@ -45,7 +45,7 @@ def test_handle_dispatches_card_for_structured_result(monkeypatch, tmp_path):
     monkeypatch.setattr(handler.sender, "send", lambda chat, text: sent.update(text=text))
     monkeypatch.setattr(handler.identity, "email_of", lambda uid: "zhangsan@example.com")
 
-    fake_agent = types.SimpleNamespace(chat=lambda text: "您有1条预约")
+    fake_agent = types.SimpleNamespace(chat=lambda text, stream_callback=None: "您有1条预约")
     monkeypatch.setattr(handler.agent_pool, "get_or_create", lambda uid: fake_agent)
     monkeypatch.setattr(handler.tool_capture, "read", lambda sid: [
         {"tool": "list_my_reservations", "result": {"code": 200, "data": [
@@ -61,16 +61,33 @@ def test_handle_dispatches_card_for_structured_result(monkeypatch, tmp_path):
     assert actions
 
 
-def test_handle_non_platform_user_gets_text_not_card(monkeypatch):
+def test_handle_non_platform_user_gets_card(monkeypatch):
+    """User-facing requirement 2026-06-10: every reply renders as a card,
+    including the role=0 non-platform-user reject path."""
     import importlib
     import bot.handler as handler
     importlib.reload(handler)
 
     sent = {}
     monkeypatch.setattr(handler.sender, "send_card", lambda chat, card: sent.update(card=card))
-    monkeypatch.setattr(handler.sender, "send", lambda chat, text: sent.update(text=text))
+    monkeypatch.setattr(handler.sender, "send_text_as_card",
+                        lambda chat, text: sent.update(card={"_text": text}))
     monkeypatch.setattr(handler.identity, "email_of", lambda uid: "")  # not a platform user
 
     handler._handle(_make_event("帮我看我的预约", "ou_ghost", "oc_chat"))
-    assert "card" not in sent
-    assert "平台用户" in sent["text"]
+    assert "card" in sent
+    # Either send_card with a wrapped card OR send_text_as_card (which we
+    # mock as a card with _text). Either way the response should reference
+    # "平台用户" and contain the user's open_id.
+    rendered = sent["card"]
+    if "_text" in rendered:
+        assert "平台用户" in rendered["_text"]
+        assert "ou_ghost" in rendered["_text"]
+    else:
+        elements = rendered.get("elements", [])
+        joined = "\n".join(
+            e.get("text", {}).get("content", "") for e in elements
+            if e.get("tag") == "div"
+        )
+        assert "平台用户" in joined
+        assert "ou_ghost" in joined
