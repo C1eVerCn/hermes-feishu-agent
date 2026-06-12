@@ -72,14 +72,20 @@ def test_warmup_thread_swallows_exceptions(monkeypatch):
 def test_warmup_agent_calls_create_openai_client_not_chat():
     """_warmup_agent must trigger SDK lazy import via _create_openai_client
     (not agent.chat, which would make a real LLM call costing $$ and
-    pollute session history with a stray 'hello' turn)."""
+    pollute session history with a stray 'hello' turn).
+
+    The kwargs are built from the agent's public api_key/base_url
+    attributes because agent._client_kwargs is itself lazily populated
+    by hermes-agent only when the first LLM call is about to fire.
+    """
     fake_agent = MagicMock()
-    fake_agent._client_kwargs = {"api_key": "test", "base_url": "http://x"}
+    fake_agent.api_key = "test-key"
+    fake_agent.base_url = "http://minimax.test/v1"
     # Call _warmup_agent synchronously (not via the thread pool)
     agent_pool_mod._warmup_agent(fake_agent)
     fake_agent._create_openai_client.assert_called_once()
     args, kwargs = fake_agent._create_openai_client.call_args
-    assert args[0] == {"api_key": "test", "base_url": "http://x"}
+    assert args[0] == {"api_key": "test-key", "base_url": "http://minimax.test/v1"}
     # chat() must NOT be called by warmup (it's a real LLM call)
     fake_agent.chat.assert_not_called()
 

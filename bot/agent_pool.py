@@ -21,17 +21,21 @@ def _warmup_agent(agent) -> None:
 
     `agent._create_openai_client` is the lazy-init chokepoint: the
     OpenAI SDK is only imported on the first client creation, which
-    happens inside the first agent.chat() call. Pre-creating the
-    client here moves that cost off the critical path of the first
-    user message. The MCP client and tool registry are already
-    loaded by the AIAgent constructor.
+    happens inside the first agent.chat() call. We build the client
+    kwargs directly from the agent's public attributes (api_key /
+    base_url) because `agent._client_kwargs` is itself initialized
+    lazily by hermes-agent right before the first LLM call.
 
     Failures are logged and swallowed — the next user message will
     fall back to the lazy-init path, just slow.
     """
     try:
+        warmup_kwargs = {
+            "api_key": getattr(agent, "api_key", None),
+            "base_url": getattr(agent, "base_url", None),
+        }
         agent._create_openai_client(
-            agent._client_kwargs, reason="container_warmup", shared=True,
+            warmup_kwargs, reason="container_warmup", shared=True,
         )
     except Exception:
         log.exception("agent_warmup_failed")
