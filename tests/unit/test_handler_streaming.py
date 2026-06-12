@@ -210,3 +210,112 @@ def test_typing_placeholder_send_failure_does_not_block_streaming(monkeypatch):
     with patch("feishu.sender.edit_message") as mock_edit:
         indicator.edit_message("hi")
     mock_edit.assert_not_called()
+
+
+# ── Task 6: Full happy path (typing → streaming → final card) ───────────────
+
+import json
+import types
+
+
+def _make_event(text, open_id, chat_id):
+    return types.SimpleNamespace(
+        event=types.SimpleNamespace(
+            message=types.SimpleNamespace(
+                message_type="text",
+                content=json.dumps({"text": text}),
+                message_id="m_stream_1",
+                chat_id=chat_id,
+            ),
+            sender=types.SimpleNamespace(
+                sender_id=types.SimpleNamespace(open_id=open_id),
+            ),
+        )
+    )
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch, tmp_path):
+    monkeypatch.setenv("FEISHU_APP_ID", "test")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "test")
+    monkeypatch.setenv("MINIMAX_API_KEY", "test")
+
+
+def test_full_happy_path_typing_then_streaming_then_card(monkeypatch, tmp_path):
+    """End-to-end: handler receives a message, types, streams LLM tokens
+    into the typing placeholder, then sends the final OCL card."""
+    import importlib
+    import bot.handler as handler
+    import bot.identity_admin as ia_mod
+    importlib.reload(ia_mod)
+    importlib.reload(handler)
+
+    # Pre-register user as role=1 (platform user)
+    from bot.identity_admin import IdentityAdmin
+    test_admin = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    test_admin.set_role("ou_stream_user", 1, operator="root")
+    monkeypatch.setattr(ia_mod, "get_admin", lambda: test_admin)
+    monkeypatch.setattr(handler, "get_identity_admin", lambda: test_admin)
+    monkeypatch.setattr(handler.identity, "email_of", lambda uid: "streamer@example.com")
+    monkeypatch.setattr(handler.notify, "remember_open_id", lambda *a, **kw: None)
+
+    # Capture sends
+    sent_card = {}
+    sent_text = {}
+    edit_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(handler.sender, "send_card",
+                        lambda chat, card: sent_card.update(chat=chat, card=card))
+    monkeypatch.setattr(handler.sender, "send_text_as_card",
+                        lambda chat, text: sent_text.update(chat=chat, text=text))
+    # Don't go through real lark typing-send; we simulate the placeholder
+    # is already in flight by injecting a TypingIndicator mock.
+    import feishu.typing_indicator as ti_mod
+    fake_typing = MagicMock()
+    fake_typing._placeholder_message_id = "om_typing_999"
+    monkeypatch.setattr(ti_mod, "TypingIndicator", lambda chat_id: fake_typing)
+
+    # AIAgent emits 3 tokens via stream_callback (crosses 5-char threshold
+    # on the 2nd flush, then a final token triggers another flush)
+    captured_callback = {}
+    def fake_chat(message, stream_callback=None):
+        captured_callback["cb"] = stream_callback
+        if stream_callback:
+            # 6 chars total: tokens "你好" (2) + "，" (1) + "世界" (2) + "！" (1)
+            stream_callback("你好")
+            stream_callback("，")
+            stream_callback("世界")
+            stream_callback("！")
+        return "你好，世界！"
+
+    fake_agent = MagicMock()
+    fake_agent.chat = fake_chat
+    monkeypatch.setattr(handler.agent_pool, "get_or_create", lambda uid: fake_agent)
+
+    # OCL pipeline returns a card with the final text
+    final_card = {"config": {"wide_screen_mode": True}, "elements": [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "你好，世界！"}},
+    ]}
+    fake_ocl = MagicMock(card=final_card, blocked=False, text="你好，世界！")
+    monkeypatch.setattr(handler, "ocl_apply", lambda *a, **kw: fake_ocl)
+    monkeypatch.setattr(handler.tool_capture, "clear", lambda sid: None)
+    monkeypatch.setattr(handler.tool_capture, "read", lambda sid: [])
+
+    # Run the handler
+    handler._handle(_make_event("查询可用台架", "ou_stream_user", "oc_stream_chat"))
+
+    # The stream_callback was actually passed to agent.chat
+    assert captured_callback["cb"] is not None
+
+    # edit_message was called multiple times with accumulating content
+    assert fake_typing.edit_message.call_count >= 2
+    # The final content of the last edit must be the full text
+    last_content = fake_typing.edit_message.call_args_list[-1][0][0]
+    assert last_content == "你好，世界！"
+
+    # Final card was sent to the right chat
+    assert "card" in sent_card
+    assert sent_card["chat"] == "oc_stream_chat"
+    assert sent_card["card"] == final_card
+
+    # Typing indicator was stopped
+    fake_typing.stop.assert_called_once()
