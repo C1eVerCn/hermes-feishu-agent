@@ -616,47 +616,85 @@ def _parse_chinese_time(text: str, now: datetime) -> Optional[datetime]:
 
 def _try_reserve_fast_path(text: str, user_id: str, email: str):
     """Bypass the LLM for simple reservation requests. Returns the OCL
-    result (with the dry_run confirm card) or None if any required arg
-    is missing / ambiguous.
+    result (with the dry_run confirm card) or an ask-user reply when
+    args are missing/ambiguous. Returns None only when the text isn't
+    a reservation request at all (so the LLM can handle it).
+
+    Key design: we DO NOT fall through to the LLM for missing/ambiguous
+    args. The LLM would take ~30s to "think" about what to ask; we can
+    ask the user directly in <1ms with a deterministic template.
+
+    Only dry_run_reserve_bench's missing_fields handling is allowed to
+    ask for task/purpose (it presents all missing fields in a single
+    card, which is better UX than one-at-a-time asks).
     """
+    from ocl.pipeline import OclResult
     norm = text.strip()
-    # Only handle explicit reservation requests
-    if not re.match(r'^(预约|帮我预约|我要预约|帮我订|我想订)\b', norm):
+    # Only handle explicit reservation requests. \b doesn't work for
+    # CJK characters, so just check the prefix matches.
+    if not re.match(r'^(预约|帮我预约|我要预约|我想预约|帮我订|我想订)', norm):
         return None
 
-    # Extract bench number
+    # ── Stage 1: extract bench number ────────────────────────────────────
     bench_match = _RESERVE_BENCH_RE.search(norm)
     if not bench_match:
-        return None  # no bench number — let LLM ask
+        return OclResult(
+            text=("请告知要预约的台架编号。\n"
+                  "例如：预约 TJ001，从明天下午5点到后天晚上8点，任务是测试，目的是感知压测"),
+            blocked=False, card=None,
+        )
     bench_no = bench_match.group(1)
 
-    # Time range: look for "从 X 到 Y" or "X 到 Y" or "X-Y" with both
-    # sides parsed by _parse_chinese_time.
+    # ── Stage 2: extract time range ──────────────────────────────────────
     range_match = re.search(
         r'(?:从|自)\s*(.+?)\s*(?:到|至|到|~|-)\s*(.+?)(?=[，,。;；\n]|任务|目的|$)',
         norm,
     )
     if not range_match:
-        return None  # no time range — let LLM handle
+        return OclResult(
+            text=(f"请告知 {bench_no} 的预约时间范围（开始 + 结束）。\n"
+                  f"例如：从明天下午5点到后天晚上8点"),
+            blocked=False, card=None,
+        )
     start_text, end_text = range_match.group(1).strip(), range_match.group(2).strip()
 
-    # CN-time aware (matches the system-prompt rule about 下午5点 meaning
-    # 17:00). The bot runs in UTC; user input is CN (UTC+8).
+    # ── Stage 3: parse the times into datetimes ─────────────────────────
     now_cn = datetime.now() + timedelta(hours=8)
     start_dt = _parse_chinese_time(start_text, now_cn)
     end_dt = _parse_chinese_time(end_text, now_cn)
-    if not start_dt or not end_dt:
-        return None  # ambiguous time — let LLM clarify
+    if not start_dt and not end_dt:
+        return OclResult(
+            text=("无法识别起止时间，请用具体时间表达。\n"
+                  "支持：「明天下午5点」「后天晚上8点」「7月1号下午3点」"),
+            blocked=False, card=None,
+        )
+    if not start_dt:
+        return OclResult(
+            text=(f"开始时间「{start_text}」无法识别，请用具体时间表达。\n"
+                  f"支持：「明天下午5点」「7月1号上午9点」"),
+            blocked=False, card=None,
+        )
+    if not end_dt:
+        return OclResult(
+            text=(f"结束时间「{end_text}」无法识别，请用具体时间表达。\n"
+                  f"支持：「后天晚上8点」「7月1号下午6点」"),
+            blocked=False, card=None,
+        )
     if end_dt <= start_dt:
-        return None  # invalid range — let LLM sort it out
+        return OclResult(
+            text=(f"结束时间早于或等于开始时间，请重新确认：\n"
+                  f"• 开始：{start_dt.strftime('%Y-%m-%d %H:%M')}\n"
+                  f"• 结束：{end_dt.strftime('%Y-%m-%d %H:%M')}"),
+            blocked=False, card=None,
+        )
 
-    # Extract task / purpose (optional — dry_run handles missing fields)
+    # ── Stage 4: extract task / purpose (optional; dry_run handles missing) ─
     task_match = _RESERVE_TASK_RE.search(norm)
     purpose_match = _RESERVE_PURPOSE_RE.search(norm)
     task = task_match.group(1).strip() if task_match else ""
     purpose = purpose_match.group(1).strip() if purpose_match else ""
 
-    # Build args and call dry_run_reserve_bench directly
+    # ── Stage 5: call dry_run ────────────────────────────────────────────
     args = {
         "benchNo": bench_no,
         "startTime": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -679,12 +717,11 @@ def _try_reserve_fast_path(text: str, user_id: str, email: str):
         raw = handler(args)
     except Exception:
         log.exception("reserve_fast_path tool_failed user=%s", user_id)
-        return None
+        return OclResult(text=_ERROR_REPLY, blocked=False, card=None)
     metrics.inc("fast_path_hits")
     log.info("reserve_fast_path hit user=%s bench=%s latency=%.0fms",
              user_id, bench_no, (time.monotonic() - t0) * 1000)
 
-    # Build captured entry as if the LLM had called the tool
     captured = [{"tool": "dry_run_reserve_bench", "result": raw}]
     return ocl_apply("请确认预约信息", user_id, captured=captured)
 

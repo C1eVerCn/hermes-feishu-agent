@@ -454,29 +454,61 @@ class TestReservationFastPath:
         assert "TJ001" in captured["args"]["benchNo"]
         assert "taskName" not in captured["args"]
 
-    def test_reservation_no_bench_returns_none(self, monkeypatch):
-        """No bench number → fall through to LLM."""
+    def test_reservation_no_bench_asks_user(self, monkeypatch):
+        """No bench number → ask user directly (don't waste 30s on LLM)."""
+        from ocl.pipeline import OclResult
+        called = []
         def fake_dry(args):
-            raise AssertionError("should not be called")
+            called.append(args)
+            return json.dumps({"dry_run": True, "args": args})
         monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
         out = self._try("我想预约一个台架，明天下午")
-        assert out is None
+        # dry_run is NOT called — we ask user first
+        assert called == []
+        # Returns an ask-user reply, not None
+        assert out is not None
+        assert out.card is None  # text-only
+        assert "台架编号" in out.text
+        assert "TJ001" in out.text  # example
 
-    def test_reservation_ambiguous_time_returns_none(self, monkeypatch):
-        """"下午" without a specific hour → fall through to LLM."""
-        def fake_dry(args):
-            raise AssertionError("should not be called")
-        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+    def test_reservation_no_time_range_asks_user(self, monkeypatch):
+        """Bench given but no time → ask for time range."""
+        from ocl.pipeline import OclResult
+        called = []
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench",
+                          lambda a: called.append(a) or json.dumps({"dry_run": True, "args": a}))
+        out = self._try("预约 TJ001")
+        assert called == []
+        assert out is not None
+        assert out.card is None
+        assert "TJ001" in out.text  # references the bench
+        assert "时间" in out.text
+
+    def test_reservation_ambiguous_time_asks_user(self, monkeypatch):
+        """"下午" without hour → ask user for specific time."""
+        from ocl.pipeline import OclResult
+        called = []
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench",
+                          lambda a: called.append(a) or json.dumps({"dry_run": True, "args": a}))
         out = self._try("预约 TJ001 明天下午到晚上")
-        assert out is None
+        assert called == []
+        assert out is not None
+        assert out.card is None
+        assert "无法识别" in out.text or "请" in out.text
 
-    def test_reservation_invalid_time_range_returns_none(self, monkeypatch):
-        """end < start → fall through to LLM."""
-        def fake_dry(args):
-            raise AssertionError("should not be called")
-        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+    def test_reservation_invalid_time_range_asks_user(self, monkeypatch):
+        """end < start → ask user to fix, with both times shown."""
+        from ocl.pipeline import OclResult
+        called = []
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench",
+                          lambda a: called.append(a) or json.dumps({"dry_run": True, "args": a}))
         out = self._try("预约 TJ001 从今天晚上8点到今天下午5点")
-        assert out is None
+        assert called == []
+        assert out is not None
+        assert out.card is None
+        # Should reference both times so user can fix
+        assert "20:00" in out.text or "下午" in out.text
+        assert "17:00" in out.text or "晚上" in out.text
 
     def test_reservation_not_a_reservation_request_returns_none(self):
         """Non-reservation text never matches."""
