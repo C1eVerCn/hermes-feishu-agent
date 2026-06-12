@@ -4,6 +4,7 @@ import re
 import time
 import contextvars
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from datetime import datetime, timedelta
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
@@ -273,6 +274,23 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
             sender.send_text_as_card(chat_id, fast.text or _ERROR_REPLY)
         return
 
+    # ── Layer 0.6: Reservation fast path ──────────────────────────────────
+    # For "预约 TJ001, 从明天下午5点到后天晚上8点, 任务是测试, 目的是感知压测",
+    # extract args via regex and call dry_run_reserve_bench directly. The
+    # confirm card still shows all args so the user can verify before
+    # clicking 确认. ~30s LLM call → ~100ms for the common case.
+    # Anything ambiguous (e.g. "下午" without a time) falls through to
+    # the LLM for clarification.
+    resv = _try_reserve_fast_path(text, user_id, email)
+    if resv is not None:
+        if resv.blocked:
+            sender.send_text_as_card(chat_id, resv.text)
+        elif resv.card is not None:
+            sender.send_card(chat_id, resv.card)
+        else:
+            sender.send_text_as_card(chat_id, resv.text or _ERROR_REPLY)
+        return
+
     # ── Identity query / admin command (bypass agent) ─────────────────────
     identity_response = _handle_identity_query(text, user_id)
     if identity_response:
@@ -515,7 +533,7 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
      lambda m: {'architecture': (m.group(1) if m.group(1).startswith('L') else m.group(1)) + '架构'}),
 
     # ── list_architectures ──
-    (re.compile(r'^(查询|查看|看看)\s*(台架)?架构(\s*列表)?[\s!！。.]*$'),
+    (re.compile(r'^(查询|查看|看看)(\s*(所有|可用))?\s*(台架)?架构(\s*列表)?[\s!！。.]*$'),
      'list_architectures', lambda m: {}),
     (re.compile(r'^(台架架构|架构列表)[\s!！。.]*$'),
      'list_architectures', lambda m: {}),
@@ -528,6 +546,147 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
     (re.compile(r'^(我的|看看我的|查看我的)?\s*(待审批|待我审批|审批列表|待审批列表)[\s!！。.]*$'),
      'list_my_approvals', lambda m: {}),
 ]
+
+
+# ── Reservation fast path: extract simple args via regex, call
+# dry_run_reserve_bench directly. Bypasses the LLM (30s → <1s) when the
+# user provides all the args the LLM would extract: bench number, start
+# time, end time, task name, test purpose. Falls through to LLM when
+# anything is ambiguous (e.g. "下午" without a specific time).
+#
+# Format expected: "预约 <BENCH>, 从 <START> 到 <END>, 任务是 X, 目的是 Y"
+# (commas and the 任务是/目的是 prefixes are flexible).
+
+_RESERVE_BENCH_RE = re.compile(r'\b([A-Z]{2,3}\d+)\b')
+_RESERVE_TASK_RE = re.compile(r'任务[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|目的|$))')
+_RESERVE_PURPOSE_RE = re.compile(r'目的[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|$))')
+
+
+def _parse_chinese_time(text: str, now: datetime) -> Optional[datetime]:
+    """Parse a Chinese time expression to an absolute datetime. Returns
+    None if ambiguous. Supports: 今天/明天/后天 + 上午/下午/晚上 + N点,
+    上午/下午/晚上 + N点 (assumes today), X月X号 + 上午/下午/晚上 + N点,
+    今晚/明早/明晚 + N点 (defaults to 9:00 if no N given).
+    """
+    # Most specific first: relative day + period + N点
+    m = re.search(
+        r'(今|明|后)天?(?:(上午|下午|早上|晚上|中午|夜里|凌晨))?\s*(\d{1,2})\s*[点时:：]',
+        text,
+    )
+    if m:
+        day_word, period, hour_str = m.groups()
+        delta_days = {"今": 0, "明": 1, "后": 2}[day_word]
+        hour = int(hour_str)
+        if period in ("下午",) and hour < 12:
+            hour += 12
+        elif period in ("晚上", "夜里", "凌晨") and hour < 12 and hour != 0:
+            hour += 12
+        return (now + timedelta(days=delta_days)).replace(
+            hour=hour, minute=0, second=0, microsecond=0)
+
+    # Bare day word: "明早" / "今晚" / "明晨" / "明夜" (no time)
+    # Use (?<![午夜凌]) to skip when the period char is the start of a
+    # longer period word like 晚上/夜里/凌晨.
+    default_day_match = re.search(r'(?<![午夜凌])(今|明|后)天?(早|晚|晨|夜)(?![一-鿿])', text)
+    if default_day_match:
+        day_word, _ = default_day_match.groups()
+        delta_days = {"今": 0, "明": 1, "后": 2}[day_word]
+        return (now + timedelta(days=delta_days)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+    # Specific date + period + N点
+    m = re.search(
+        r'(\d{1,2})\s*月\s*(\d{1,2})\s*号?\s*(?:(上午|下午|早上|晚上|中午|夜里|凌晨))?\s*(\d{1,2})\s*[点时:：]?',
+        text,
+    )
+    if m:
+        month, day, period, hour_str = m.groups()
+        month, day, hour = int(month), int(day), int(hour_str)
+        if period in ("下午",) and hour < 12:
+            hour += 12
+        elif period in ("晚上", "夜里", "凌晨") and hour < 12 and hour != 0:
+            hour += 12
+        year = now.year
+        try:
+            return datetime(year, month, day, hour, 0, 0)
+        except ValueError:
+            return None
+
+    return None
+
+
+def _try_reserve_fast_path(text: str, user_id: str, email: str):
+    """Bypass the LLM for simple reservation requests. Returns the OCL
+    result (with the dry_run confirm card) or None if any required arg
+    is missing / ambiguous.
+    """
+    norm = text.strip()
+    # Only handle explicit reservation requests
+    if not re.match(r'^(预约|帮我预约|我要预约|帮我订|我想订)\b', norm):
+        return None
+
+    # Extract bench number
+    bench_match = _RESERVE_BENCH_RE.search(norm)
+    if not bench_match:
+        return None  # no bench number — let LLM ask
+    bench_no = bench_match.group(1)
+
+    # Time range: look for "从 X 到 Y" or "X 到 Y" or "X-Y" with both
+    # sides parsed by _parse_chinese_time.
+    range_match = re.search(
+        r'(?:从|自)\s*(.+?)\s*(?:到|至|到|~|-)\s*(.+?)(?=[，,。;；\n]|任务|目的|$)',
+        norm,
+    )
+    if not range_match:
+        return None  # no time range — let LLM handle
+    start_text, end_text = range_match.group(1).strip(), range_match.group(2).strip()
+
+    # CN-time aware (matches the system-prompt rule about 下午5点 meaning
+    # 17:00). The bot runs in UTC; user input is CN (UTC+8).
+    now_cn = datetime.now() + timedelta(hours=8)
+    start_dt = _parse_chinese_time(start_text, now_cn)
+    end_dt = _parse_chinese_time(end_text, now_cn)
+    if not start_dt or not end_dt:
+        return None  # ambiguous time — let LLM clarify
+    if end_dt <= start_dt:
+        return None  # invalid range — let LLM sort it out
+
+    # Extract task / purpose (optional — dry_run handles missing fields)
+    task_match = _RESERVE_TASK_RE.search(norm)
+    purpose_match = _RESERVE_PURPOSE_RE.search(norm)
+    task = task_match.group(1).strip() if task_match else ""
+    purpose = purpose_match.group(1).strip() if purpose_match else ""
+
+    # Build args and call dry_run_reserve_bench directly
+    args = {
+        "benchNo": bench_no,
+        "startTime": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "endTime": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if task:
+        args["taskName"] = task
+    if purpose:
+        args["testPurpose"] = purpose
+
+    set_current_user(user_id)
+    set_current_email(email)
+    from bench_tools import handlers as bench_handlers
+    handler = getattr(bench_handlers, "dry_run_reserve_bench", None)
+    if handler is None:
+        return None
+
+    t0 = time.monotonic()
+    try:
+        raw = handler(args)
+    except Exception:
+        log.exception("reserve_fast_path tool_failed user=%s", user_id)
+        return None
+    metrics.inc("fast_path_hits")
+    log.info("reserve_fast_path hit user=%s bench=%s latency=%.0fms",
+             user_id, bench_no, (time.monotonic() - t0) * 1000)
+
+    # Build captured entry as if the LLM had called the tool
+    captured = [{"tool": "dry_run_reserve_bench", "result": raw}]
+    return ocl_apply("请确认预约信息", user_id, captured=captured)
 
 
 def _try_fast_path(text: str, user_id: str, email: str, role: int):

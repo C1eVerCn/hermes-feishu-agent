@@ -354,3 +354,133 @@ class TestFastPathSummary:
         assert "1" in captured_summary["response"]
         assert out is not None
         assert out.card is not None
+
+
+class TestParseChineseTime:
+    """Test the CN-time parser used by the reservation fast path."""
+
+    def setup_method(self):
+        from datetime import datetime
+        # Fixed "now" so tests are deterministic
+        self.now = datetime(2026, 6, 12, 10, 0, 0)  # 2026-06-12 10:00
+
+    def _t(self, text):
+        from bot.handler import _parse_chinese_time
+        return _parse_chinese_time(text, self.now)
+
+    def test_tomorrow_afternoon_5(self):
+        dt = self._t("明天下午5点")
+        assert dt.year == 2026 and dt.month == 6 and dt.day == 13
+        assert dt.hour == 17 and dt.minute == 0
+
+    def test_today_morning_9(self):
+        dt = self._t("今天上午9点")
+        assert dt.day == 12
+        assert dt.hour == 9
+
+    def test_day_after_tomorrow_evening_8(self):
+        dt = self._t("后天晚上8点")
+        assert dt.day == 14
+        assert dt.hour == 20
+
+    def test_afternoon_12_no_shift(self):
+        # 下午12点 should stay 12, not become 24
+        dt = self._t("明天下午12点")
+        assert dt.hour == 12
+
+    def test_evening_12_no_shift(self):
+        # 晚上12点 = midnight of next day, but parser leaves hour=12 (caller's call)
+        dt = self._t("今天晚上12点")
+        assert dt.hour == 12
+
+    def test_specific_date_with_time(self):
+        dt = self._t("7月1号下午3点")
+        assert dt.month == 7 and dt.day == 1
+        assert dt.hour == 15
+
+    def test_tonight_morning_etc_default(self):
+        # "明早" defaults to 9:00
+        dt = self._t("明早")
+        assert dt.day == 13 and dt.hour == 9
+
+    def test_ambiguous_returns_none(self):
+        assert self._t("") is None
+        assert self._t("今天") is None  # day only, no time
+        assert self._t("几点") is None
+
+
+class TestReservationFastPath:
+    """End-to-end: text → extracted args → dry_run_reserve_bench → OCL card."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+
+    def _try(self, text):
+        return self.handler._try_reserve_fast_path(text, "ou_x", "x@y.com")
+
+    def test_reservation_完整_args_extracted(self, monkeypatch):
+        """User provides all 5 args — dry_run called with full payload."""
+        from ocl.pipeline import OclResult
+        captured = {}
+        def fake_dry(args):
+            captured["args"] = args
+            return json.dumps({"dry_run": True, "summary": "确认", "args": args})
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+        monkeypatch.setattr(self.handler, "ocl_apply",
+            lambda resp, uid, captured=None: OclResult(text=resp, blocked=False, card={"ok": True}))
+        out = self._try("预约 TJ001，从明天下午5点到后天晚上8点，任务是测试，目的是感知压测")
+        assert out is not None
+        assert "TJ001" in captured["args"]["benchNo"]
+        assert "17:00" in captured["args"]["startTime"]
+        assert "20:00" in captured["args"]["endTime"]
+        assert captured["args"]["taskName"] == "测试"
+        assert captured["args"]["testPurpose"] == "感知压测"
+
+    def test_reservation_missing_task_still_called(self, monkeypatch):
+        """Task is optional — dry_run handles missing fields."""
+        from ocl.pipeline import OclResult
+        captured = {}
+        def fake_dry(args):
+            captured["args"] = args
+            return json.dumps({"dry_run": True, "missing_fields": ["taskName", "testPurpose"],
+                              "summary": "请补充", "args": args})
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+        monkeypatch.setattr(self.handler, "ocl_apply",
+            lambda resp, uid, captured=None: OclResult(text=resp, blocked=False, card={"ok": True}))
+        out = self._try("预约 TJ001 从明天下午3点到明天下午4点")
+        assert out is not None
+        assert "TJ001" in captured["args"]["benchNo"]
+        assert "taskName" not in captured["args"]
+
+    def test_reservation_no_bench_returns_none(self, monkeypatch):
+        """No bench number → fall through to LLM."""
+        def fake_dry(args):
+            raise AssertionError("should not be called")
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+        out = self._try("我想预约一个台架，明天下午")
+        assert out is None
+
+    def test_reservation_ambiguous_time_returns_none(self, monkeypatch):
+        """"下午" without a specific hour → fall through to LLM."""
+        def fake_dry(args):
+            raise AssertionError("should not be called")
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+        out = self._try("预约 TJ001 明天下午到晚上")
+        assert out is None
+
+    def test_reservation_invalid_time_range_returns_none(self, monkeypatch):
+        """end < start → fall through to LLM."""
+        def fake_dry(args):
+            raise AssertionError("should not be called")
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench", fake_dry)
+        out = self._try("预约 TJ001 从今天晚上8点到今天下午5点")
+        assert out is None
+
+    def test_reservation_not_a_reservation_request_returns_none(self):
+        """Non-reservation text never matches."""
+        assert self._try("查询可用台架") is None
+        assert self._try("我的预约") is None
+        assert self._try("你好") is None
+        assert self._try("") is None
