@@ -573,3 +573,35 @@ class TestReservationFastPathSavesDryRunState:
         pending = self.handler.dry_run_state.get("ou_x")
         assert pending is not None
         assert pending["benchNo"] == "TJ001"
+
+
+class TestBenchExtraction:
+    """Bench number regex must work for '预约CT001' (no space between
+    Chinese and ASCII) — Python regex \\b doesn't fire on CJK→ASCII
+    boundary, so we drop the leading \\b."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+
+    def test_bench_extracted_from_cjk_then_ascii(self):
+        # Direct bench extraction
+        m = self.handler._RESERVE_BENCH_RE.search("预约CT001")
+        assert m is not None
+        assert m.group(1) == "CT001"
+
+    def test_bench_extracted_with_space(self):
+        m = self.handler._RESERVE_BENCH_RE.search("预约 TJ001")
+        assert m is not None
+        assert m.group(1) == "TJ001"
+
+    def test_bench_extracted_in_middle(self):
+        m = self.handler._RESERVE_BENCH_RE.search("帮我预约一下 TB001 明天")
+        assert m is not None
+        assert m.group(1) == "TB001"
+
+    def test_long_bench_extracted(self):
+        m = self.handler._RESERVE_BENCH_RE.search("预约TJ052503")
+        assert m is not None
+        assert m.group(1) == "TJ052503"

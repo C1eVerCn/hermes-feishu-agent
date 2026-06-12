@@ -483,7 +483,7 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
 # Format expected: "预约 <BENCH>, 从 <START> 到 <END>, 任务是 X, 目的是 Y"
 # (commas and the 任务是/目的是 prefixes are flexible).
 
-_RESERVE_BENCH_RE = re.compile(r'\b([A-Z]{2,3}\d+)\b')
+_RESERVE_BENCH_RE = re.compile(r'([A-Z]{2,3}\d+)')
 _RESERVE_TASK_RE = re.compile(r'任务[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|目的|$))')
 _RESERVE_PURPOSE_RE = re.compile(r'目的[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|$))')
 
