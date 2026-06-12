@@ -23,7 +23,7 @@ def test_edit_message_uses_patch_endpoint_and_payload(mock_lark_response):
     with patch.object(sender._client.im.v1.message, "update",
                      return_value=mock_lark_response) as mock_update, \
          patch("time.sleep"):
-        sender.edit_message("oc_chat_123", "om_msg_456", "hello world")
+        sender.edit_message("om_msg_456", "hello world")
     # Assert the right endpoint was called with right args
     assert mock_update.call_count == 1
     req = mock_update.call_args[0][0]
@@ -47,7 +47,7 @@ def test_edit_message_retries_on_429(mock_lark_response):
     with patch.object(sender._client.im.v1.message, "update",
                      side_effect=[fail, fail, ok]) as mock_update, \
          patch("time.sleep") as mock_sleep:
-        sender.edit_message("oc_x", "om_y", "hi")
+        sender.edit_message("om_y", "hi")
     assert mock_update.call_count == 3
     # Should sleep 1s, 2s (2**0, 2**1) for the two failures
     assert mock_sleep.call_count == 2
@@ -61,7 +61,7 @@ def test_edit_message_swallows_non_429_failure():
     with patch.object(sender._client.im.v1.message, "update",
                      return_value=fail) as mock_update, \
          patch("feishu.sender.log") as mock_log:
-        sender.edit_message("oc_x", "om_y", "hi")
+        sender.edit_message("om_y", "hi")
     # Only one call, no retries
     assert mock_update.call_count == 1
     # Logged as error

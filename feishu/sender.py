@@ -95,7 +95,7 @@ def send_card(chat_id: str, card: dict, max_retries: int = 3) -> None:
     log.error("Feishu send_card failed after %d retries for chat_id=%s", max_retries, chat_id)
 
 
-def edit_message(chat_id: str, message_id: str, content_text: str,
+def edit_message(message_id: str, content_text: str,
                 max_retries: int = 3) -> None:
     """Update an existing Feishu message in place. Used by streaming to
     append token updates to the typing placeholder bubble.
@@ -104,9 +104,10 @@ def edit_message(chat_id: str, message_id: str, content_text: str,
     are logged and dropped (the next edit_message call will retry the
     whole stream; cumulative drop is acceptable for streaming UX).
 
-    Note: the Feishu PATCH /im/v1/messages/{message_id} endpoint does not
-    require receive_id (the target is the message_id) nor msg_type (the
-    message type is fixed at create time); only the new `content` body
+    No chat_id is needed: the Feishu PATCH /im/v1/messages/{message_id}
+    endpoint identifies the target via the message_id path parameter,
+    and the SDK's PatchMessageRequest / PatchMessageRequestBody builders
+    do not accept a receive_id or msg_type — only the new `content` body
     field is needed.
     """
     global _last_send_time
