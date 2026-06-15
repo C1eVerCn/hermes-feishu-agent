@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DMZ 智能体 · 项目说明</title>
+<style>
+  :root{
+    --bg:#fbfcfd; --surface:#ffffff; --ink:#1f2933; --ink-soft:#52606d;
+    --muted:#7b8794; --line:#e4e7eb; --line-soft:#eef1f4;
+    --accent:#2f6fed; --accent-soft:#eaf1fe;
+    --green:#1a936f; --green-soft:#e7f4ee;
+    --amber:#b7791f; --amber-soft:#fbf3e3;
+    --red:#c0392b; --red-soft:#fbecea;
+    --code-bg:#f5f7f9;
+    --radius:10px;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+       font-size:15px;line-height:1.75;-webkit-font-smoothing:antialiased;}
+  .wrap{display:grid;grid-template-columns:240px 1fr;max-width:1180px;margin:0 auto;gap:0;}
+  /* sidebar */
+  nav{position:sticky;top:0;align-self:start;height:100vh;overflow-y:auto;
+      padding:32px 20px;border-right:1px solid var(--line);background:var(--surface);}
+  nav .brand{font-weight:700;font-size:16px;letter-spacing:.3px;margin-bottom:4px;}
+  nav .brand small{display:block;color:var(--muted);font-weight:400;font-size:12px;margin-top:4px;}
+  nav ol{list-style:none;padding:0;margin:22px 0 0;counter-reset:s;}
+  nav li{margin:1px 0;}
+  nav a{display:block;color:var(--ink-soft);text-decoration:none;font-size:13.5px;
+        padding:7px 10px;border-radius:7px;counter-increment:s;}
+  nav a::before{content:counter(s)".";color:var(--muted);margin-right:8px;font-variant-numeric:tabular-nums;}
+  nav a:hover{background:var(--line-soft);color:var(--ink);}
+  /* content */
+  main{padding:48px 56px 120px;min-width:0;}
+  header.hero{margin-bottom:40px;padding-bottom:28px;border-bottom:1px solid var(--line);}
+  header.hero h1{font-size:30px;margin:0 0 10px;letter-spacing:.5px;}
+  header.hero p{color:var(--ink-soft);margin:6px 0;max-width:70ch;}
+  .tags{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;}
+  .tag{font-size:12px;padding:3px 11px;border-radius:20px;background:var(--accent-soft);
+       color:var(--accent);font-weight:500;}
+  .tag.g{background:var(--green-soft);color:var(--green);}
+  .tag.m{background:var(--line-soft);color:var(--ink-soft);}
+  section{margin:0 0 56px;scroll-margin-top:24px;}
+  h2{font-size:21px;margin:0 0 6px;padding-top:8px;letter-spacing:.3px;}
+  h2 .num{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:10px;font-weight:600;}
+  .lead{color:var(--muted);margin:0 0 22px;font-size:14px;}
+  h3{font-size:16px;margin:30px 0 10px;color:var(--ink);}
+  h4{font-size:14px;margin:20px 0 8px;color:var(--ink-soft);font-weight:600;}
+  p{margin:10px 0;}
+  ul,ol{padding-left:22px;margin:10px 0;}
+  li{margin:5px 0;}
+  code{font-family:var(--mono);font-size:.88em;background:var(--code-bg);
+       padding:2px 6px;border-radius:5px;color:#324;}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:var(--radius);
+      padding:16px 18px;overflow-x:auto;font-family:var(--mono);font-size:12.8px;
+      line-height:1.65;color:var(--ink);margin:14px 0;}
+  pre code{background:none;padding:0;font-size:inherit;color:inherit;}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13.5px;}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top;}
+  th{background:var(--line-soft);font-weight:600;color:var(--ink);}
+  tbody tr:nth-child(even){background:#fafbfc;}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+        padding:18px 22px;margin:16px 0;}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .note{border-left:3px solid var(--accent);background:var(--accent-soft);
+        padding:12px 16px;border-radius:0 8px 8px 0;margin:16px 0;font-size:13.8px;color:var(--ink-soft);}
+  .note.g{border-color:var(--green);background:var(--green-soft);}
+  .note.a{border-color:var(--amber);background:var(--amber-soft);}
+  .note.r{border-color:var(--red);background:var(--red-soft);}
+  .note strong{color:var(--ink);}
+  .pill{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:5px;vertical-align:middle;}
+  .pill.on{background:var(--green-soft);color:var(--green);}
+  .pill.ro{background:var(--amber-soft);color:var(--amber);}
+  .kbd{font-family:var(--mono);font-size:12px;background:#fff;border:1px solid var(--line);
+       border-bottom-width:2px;border-radius:5px;padding:1px 7px;}
+  .flow{font-family:var(--mono);font-size:12.6px;line-height:1.9;white-space:pre;
+        background:var(--code-bg);border:1px solid var(--line);border-radius:var(--radius);
+        padding:18px 20px;overflow-x:auto;color:var(--ink-soft);}
+  footer{margin-top:60px;padding-top:24px;border-top:1px solid var(--line);
+         color:var(--muted);font-size:12.5px;}
+  hr.soft{border:none;border-top:1px solid var(--line-soft);margin:28px 0;}
+  @media(max-width:820px){
+    .wrap{grid-template-columns:1fr;}
+    nav{position:static;height:auto;border-right:none;border-bottom:1px solid var(--line);}
+    nav ol{display:flex;flex-wrap:wrap;gap:4px;}
+    main{padding:28px 22px 80px;}
+    .grid2{grid-template-columns:1fr;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <div class="brand">DMZ 智能体
+    <small>飞书 · hermes-agent · 受控 LLM 输出</small>
+  </div>
+  <ol>
+    <li><a href="#arch">项目整体架构</a></li>
+    <li><a href="#flow">工作流程（台架预约）</a></li>
+    <li><a href="#perm">权限控制设计与实现</a></li>
+    <li><a href="#ocl">输出边界控制设计与实现</a></li>
+    <li><a href="#evo">Hermes 自进化约束与方向控制</a></li>
+    <li><a href="#next">后续开发方向</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1>DMZ 智能体 · 项目说明</h1>
+  <p>一个基于 <strong>hermes-agent</strong>（NousResearch）+ Minimax 的飞书机器人，通过 WebSocket 接收消息，
+  在真实通道上探索<strong>受控 LLM 输出</strong>：格式、内容边界、权限、工具调用边界与输出长度。</p>
+  <p>整合两个业务域：<strong>台架预约</strong>（REST API @9013）与 <strong>VLM 精标数据</strong>（dmz-ess-vlm REST API @9014）。</p>
+  <div class="tags">
+    <span class="tag">Python 3.11+</span>
+    <span class="tag">hermes-agent</span>
+    <span class="tag">lark-oapi (WebSocket)</span>
+    <span class="tag">FastAPI · httpx</span>
+    <span class="tag g">358 单元测试全绿</span>
+  </div>
+</header>
+
+<!-- ============ 1. 架构 ============ -->
+<section id="arch">
+  <h2><span class="num">1</span>项目整体架构</h2>
+  <p class="lead">分层清晰、一层一职责；框架代码与业务域解耦，换业务域只动 <code>*_tools/</code> 与配置。</p>
+
+  <h3>1.1 端到端数据流</h3>
+  <div class="flow">飞书用户
+   │  WebSocket 长连接（飞书主动推送，无需公网 IP）
+   ▼
+feishu/ws_client.py        接收事件 → 去重 → 入队（回调零阻塞）
+   │  queue.Queue
+   ▼
+bot/handler.py             消费线程：意图分层 → Agent → OCL → 发送
+   │
+   ├─ Layer 0    简单意图（你好/帮助）           → 即时回复
+   ├─ Layer 0.5  查询快速路径（查可用台架…）      → 直接调工具 &lt;1s
+   ├─ Layer 0.6  预约快速路径（正则抽参→dry_run）  → 确认卡片
+   ├─ 身份/管理命令（我的权限 / 设置角色 / 查看用户）→ bypass Agent
+   └─ Agent 调用 ── hermes AIAgent（每用户一实例，LRU 池）
+                      │  注入「已核验身份」前缀 + Minimax 推理
+                      ├─ L1 pre_tool_call 插件（硬拦截）
+                      └─ L2 guarded() 包装器（兜底）
+                      │  工具执行（bench @9013 / vlm @9014）
+                      ▼
+                   ocl/pipeline.apply()   format → content → length → 卡片
+                      ▼
+feishu/sender.py           互动卡片（或纯文本兜底）→ 飞书
+   ▲
+   └── 卡片按钮点击 → ws_client(card action) → bot/card_action_handler（确定性，不经 LLM）</div>
+
+  <h3>1.2 模块职责</h3>
+  <table>
+    <thead><tr><th>目录</th><th>职责</th><th>关键文件</th></tr></thead>
+    <tbody>
+      <tr><td><code>feishu/</code></td><td>只做 WebSocket 收发 / 限流 / 通知；零业务逻辑</td><td>ws_client, sender, typing_indicator, notify</td></tr>
+      <tr><td><code>bot/</code></td><td>hermes-agent 桥接：意图分层、Agent 池、卡片回调、身份管理、自进化</td><td>handler, agent_pool, card_action_handler, identity_admin, dmz_memory, feedback, curator_runner, dry_run_state, reservation_store</td></tr>
+      <tr><td><code>ocl/</code></td><td>Output Control Layer：格式/内容/长度、角色 ACL、身份解析、卡片构建</td><td>pipeline, format_control, content_filter, length_limiter, permission, identity, session_map, tool_guard, tool_capture, card_builder, markdown_to_lark</td></tr>
+      <tr><td><code>bench_tools/</code></td><td>台架预约工具；handler 用 <code>guarded()</code> 包裹；emailAddress 服务端注入</td><td>register, handlers, jwt_auth</td></tr>
+      <tr><td><code>vlm_tools/</code></td><td>VLM 精标工具；直接 httpx 调真实 API；<strong>无</strong>身份注入</td><td>register, handlers</td></tr>
+      <tr><td><code>hermes_plugins/</code></td><td>hermes 插件：<code>feishu_acl</code> 的 pre/post_tool_call 钩子</td><td>feishu_acl/</td></tr>
+      <tr><td><code>infra/</code></td><td>去重、指标、健康检查、原子 JSON 存储；无领域知识</td><td>dedup, metrics, health, json_store</td></tr>
+      <tr><td><code>config/</code></td><td>读取 <code>.env</code>；所有配置的唯一来源</td><td>settings</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1.3 双业务域</h3>
+  <table>
+    <thead><tr><th>域</th><th>后端端口</th><th>LLM-facing 层</th><th>鉴权方式</th></tr></thead>
+    <tbody>
+      <tr><td>台架预约</td><td>9013</td><td><code>bench_tools/</code></td><td>emailAddress 服务端按 open_id 注入 + 服务账号 JWT</td></tr>
+      <tr><td>VLM 精标</td><td>9014</td><td><code>vlm_tools/</code></td><td>无（VLM API 不鉴权）</td></tr>
+    </tbody>
+  </table>
+  <div class="note a"><strong>关键不变量：</strong>台架域 <code>emailAddress</code> 永不作为 LLM 工具参数（防止弱模型替别人预约）；VLM 域工具 schema 不得含 <code>emailAddress</code>。</div>
+
+  <h3>1.4 线程模型</h3>
+  <pre><code>主线程          uvicorn（/health HTTP，端口 8088）
+ws-supervisor   lark WSClient + 指数退避重连
+consumer        从队列取事件 → handler._handle（串行）
+agent-worker     ThreadPoolExecutor(max_workers=5)  并发 LLM 调用
+agent-warmup    首次建 Agent 时后台预热（lazy init + Curator 巡检）
+hermes tool      _MAX_TOOL_WORKERS=8  工具 handler 执行</code></pre>
+  <div class="note"><strong>跨线程身份传递：</strong>提交 <code>agent.chat</code> 前用 <code>contextvars.copy_context()</code> 复制上下文，
+  否则工具线程读不到 <code>set_current_email()</code>，POST body 会缺 <code>emailAddress</code>。</div>
+</section>
+
+<!-- ============ 2. 工作流程 ============ -->
+<section id="flow">
+  <h2><span class="num">2</span>项目工作流程（台架预约）</h2>
+  <p class="lead">分层拦截，把高频确定性操作从 30s 的 LLM 路径上摘下来，降到 &lt;1s；只有自由形态请求才进 LLM。</p>
+
+  <h3>2.1 消息进入后的判定顺序</h3>
+  <ol>
+    <li><strong>身份解析（最早）</strong>：open_id → 飞书 Contact API 取 email/name → <code>auto_register</code> 建档 → 解析 <code>role</code>（含 <code>OCL_ADMIN_USER_IDS</code> 自动升 role 3）。</li>
+    <li><strong>Layer 0 简单意图</strong>：你好 / 帮助 / 谢谢 等正则命中 → 即时卡片回复，不进 Agent。</li>
+    <li><strong>Layer 0.5 查询快速路径</strong>：「查可用台架」「我的预约」「台架架构」等 → 直接调 <code>bench_handlers</code>（已被 <code>guarded()</code> 包裹）→ OCL 卡片，&lt;1s。</li>
+    <li><strong>Layer 0.6 预约快速路径</strong>：「预约 TJ001，从明天下午5点到后天晚上8点，任务是X，目的是Y」→ 正则抽参 + 中文时间解析 → <code>dry_run_reserve_bench</code> → 确认卡片。</li>
+    <li><strong>身份 / 管理命令</strong>：<span class="kbd">我的权限</span> <span class="kbd">设置角色 ou_xxx 2</span> <span class="kbd">查看用户</span> → bypass Agent，确定性处理。</li>
+    <li><strong>身份闸</strong>：<code>role==0</code>（非平台用户）→ 友好提示联系管理员开通。</li>
+    <li><strong>确认/取消拦截器</strong>：存在待确认 dry_run 且用户回「确认/取消」→ 确定性执行真实预约（不经 LLM）。</li>
+    <li><strong>Agent 调用</strong>：以上都不命中 → 注入「已核验身份」前缀 + 原文 → <code>agent.chat()</code> → OCL → 卡片。</li>
+  </ol>
+
+  <h3>2.2 预约两步流程（dry_run → 确认）</h3>
+  <div class="flow">用户：预约 TJ001，从明天下午5点到后天晚上8点，任务是标定，目的是感知压测
+   │
+   ▼  Layer 0.6 正则抽参 + 中文时间解析（UTC+8）
+dry_run_reserve_bench(args)        ← 真实 reserve_bench 对 LLM 不可见
+   │  返回确认卡片（含全部字段，缺字段则提示补全）
+   ▼
+保存 dry_run_state[user_id]
+   │
+   ▼  用户回「确认」
+确认/取消拦截器 → 权限闸(reserve_bench) → set_current_email → reserve_bench(真实)
+   │
+   ├─ 通知本组调度员（best-effort，DM）
+   ├─ 申请人确认卡片
+   └─ reservation_store 落盘 (benchNo,startTime → applicant_open_id)，供审批通过后回 DM 申请人</div>
+  <div class="note"><strong>为什么 dry_run 在前：</strong>弱模型容易传错参；先用确定性确认卡片把全部字段摆给用户核对，
+  点「确认」才真正下单，并触发调度员通知——把易错环节从 LLM 手里拿走。</div>
+
+  <h3>2.3 卡片按钮真回调（确定性，不经 LLM）</h3>
+  <p>查询/预约卡片上的按钮点击是<strong>同步回调</strong>，由 <code>bot/card_action_handler.py</code> 处理：
+  取点击者 open_id → 注入 email + OCL 角色门控 → 直接调对应工具 → 返回 toast。</p>
+  <table>
+    <thead><tr><th>卡片来源</th><th>按钮</th><th>动作 → 工具</th></tr></thead>
+    <tbody>
+      <tr><td>我的预约（待审批）</td><td>取消预约</td><td><code>cancel</code> → cancel_reservation</td></tr>
+      <tr><td>我的审批（待审批）</td><td>批准 / 拒绝</td><td><code>approve</code> → approve_reservation</td></tr>
+      <tr><td>已批准的预约</td><td>归还台架</td><td><code>return</code> → return_bench（缺地点则引导补充）</td></tr>
+    </tbody>
+  </table>
+  <div class="note g"><strong>伪造防护：</strong>按钮 <code>value</code> 永不含 email——由点击者 open_id 反查，外加 OCL 角色门控 + 后端业务校验两道闸，伪造 value 也越不了权。</div>
+</section>
+
+<!-- ============ 3. 权限控制 ============ -->
+<section id="perm">
+  <h2><span class="num">3</span>权限控制设计与实现</h2>
+  <p class="lead">三档角色 + 双层独立防御 + 服务端身份注入；LLM 只被「告知」身份，<strong>从不</strong>被信任来决定权限。</p>
+
+  <h3>3.1 角色模型</h3>
+  <table>
+    <thead><tr><th>角色</th><th>能力</th><th>台架工具（最低角色）</th><th>VLM 工具</th></tr></thead>
+    <tbody>
+      <tr><td>1 普通用户</td><td>查询 / 预约 / 取消 / 归还自己范围内台架；查 VLM 公开数据</td><td>list_architectures, list_available_benches, reserve_bench, cancel_reservation, return_bench, list_my_reservations</td><td>list_*/get_*/playback/download_metadata/frame_image_url</td></tr>
+      <tr><td>2 调度员</td><td>+ 审批本组预约、查本组待审批</td><td>approve_reservation, list_my_approvals</td><td>+ 数据导出下载</td></tr>
+      <tr><td>3 管理员</td><td>+ 跨组审批、触发 VLM 同步等系统级操作</td><td>（全部）</td><td>sync_execute, trigger_sync_async, sync_status</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.2 身份从哪来（open_id / email 作为识别码）</h3>
+  <p>每条飞书消息都带发送者 <code>open_id</code>。身份解析链：</p>
+  <ul>
+    <li><code>open_id</code> → 飞书 Contact API 解析 <strong>email / name</strong>（内存缓存 + 负向缓存，单次调用 2s 超时防抖）。</li>
+    <li><strong>role 来源（优先级）</strong>：<code>data/identity_map.json</code> 的管理员覆盖 → <code>OCL_ADMIN_USER_IDS</code> 环境变量（自动升至 role 3 并持久化）→ 飞书能拿到 email 则默认 role 1 → 否则 role 0（非平台用户）。</li>
+    <li>身份记录由 <code>bot/identity_admin.py</code>（v2 schema）持久化到 <code>data/identity_map.json</code>，所有写操作落审计 <code>data/identity_audit.jsonl</code>。</li>
+  </ul>
+  <div class="note a"><strong>近期修复①（LLM 角色失认）：</strong>过去 Agent 只收到用户原文，<strong>身份对 LLM 不可见</strong>，导致管理员被 LLM 说成「普通用户 role=1」。
+  现已在每轮注入<strong>服务端已核验的身份前缀</strong>（角色 + 权限范围，不含 PII），见 <code>handler._identity_preamble()</code>。权限<em>执行</em>本就独立于 LLM，此修复纠正的是 LLM 的<em>表述</em>。</div>
+  <div class="note a"><strong>近期修复②（两套 admin 不一致）：</strong><code>OCL_ADMIN_USER_IDS</code> 过去只对「管理命令」生效，不影响 <code>role</code> 变量。
+  现统一为 <code>_resolve_role_with_env_admin()</code>：env 内的管理员在<strong>所有路径</strong>都解析为 role 3，并写回 store 作为唯一事实源。</div>
+
+  <h3>3.3 双层防御（两道独立的闸）</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>Layer 1 · pre_tool_call 插件（硬拦截）</h4>
+      <p>位于 hermes 内部、工具执行前最后检查点。<code>session_id</code> → <code>session_map.lookup()</code> → <code>user_id</code> → <code>is_tool_permitted()</code>。</p>
+      <p>返回 <code>{"action":"block"}</code> 阻断；任何异常 <strong>fail-open</strong>（放行），由 Layer 2 兜底。</p>
+    </div>
+    <div class="card">
+      <h4>Layer 2 · guarded() 包装器（兜底）</h4>
+      <p>位于工具 handler 入口。通过 <code>threading.local</code> 读 <code>get_current_user()</code> → <code>is_tool_permitted()</code>。</p>
+      <p>覆盖 Layer 1 失效场景（插件未加载 / config 误删 / session_map 缺失）。</p>
+    </div>
+  </div>
+  <p>OCL 只做<strong>粗粒度</strong>门控（按 <code>TOOL_MIN_ROLE</code> 表能否调某工具）；<strong>细粒度</strong>规则（同组、状态机限制）由后端按 <code>emailAddress</code> 强制——两道相互独立的闸，演示分层防御。</p>
+
+  <h3>3.4 emailAddress 服务端注入</h3>
+  <p>台架域工具 schema <strong>不含</strong> <code>emailAddress</code>；调用前 <code>handler</code> 用 <code>set_current_email(email)</code> 写入 thread-local，
+  <code>bench_handlers</code> 发 HTTP 时从上下文注入。弱模型既无法编造邮箱，也无法给别人预约。VLM 域则完全不注入身份。</p>
+</section>
+
+<!-- ============ 4. 输出边界控制 ============ -->
+<section id="ocl">
+  <h2><span class="num">4</span>输出边界控制设计与实现（OCL）</h2>
+  <p class="lead">弱模型输出不可信：可能泄漏 tool-call JSON、内部 turn 标记、超长或越界内容。OCL 在发送前做确定性兜底。</p>
+
+  <h3>4.1 流水线</h3>
+  <div class="flow">ocl/pipeline.apply(response, user_id, captured)
+   │
+   ├─ format_control   剥离 tool-call JSON / "新消息"/"System:" 等内部 turn 标记；空响应 → 兜底语
+   ├─ content_filter   正则检查（政治敏感、密钥泄漏）→ 命中则整条替换为 OCL_CONTENT_BLOCK_MESSAGE
+   ├─ length_limiter    硬截断（默认 4000 字），保护飞书消息上限
+   └─ card_builder     文本(摘要) + 捕获的工具原始 JSON → 互动卡片
+   ▼
+OclResult(text, blocked, block_reason, card)</div>
+
+  <h3>4.2 确定性卡片渲染</h3>
+  <p>通过 hermes <code>post_tool_call</code> 钩子把每个工具返回的<strong>原始 JSON</strong> 按 session 存入 <code>ocl/tool_capture.py</code>；
+  <code>card_builder</code> 用原始数据渲染卡片（<strong>无标题栏</strong>：摘要块 + 确定性数据块 + 交互按钮），<strong>数据不经弱模型转述</strong>。</p>
+  <ul>
+    <li><code>markdown_to_lark.py</code>：<code>#</code> 标题 → 加粗，去掉飞书不支持的 <code>```</code> 代码围栏，解决字面星号/横线问题。</li>
+    <li>状态以文字徽标体现：🟡待审批 / 🟢已批准 / 🔴已拒绝 / ⚪已取消 / ✅已完成。</li>
+    <li>只对<strong>参数自足</strong>的动作放真回调按钮；可用台架的「预约」缺时间/任务 → 不放按钮，走对话。</li>
+  </ul>
+
+  <h3>4.3 系统提示里的硬输出边界</h3>
+  <p>构造 Agent 时通过 <code>ephemeral_system_prompt</code> 注入硬规则（节选）：</p>
+  <ul>
+    <li>禁止在正文输出 tool-call JSON、<code>System:</code>/<code>Human:</code>/<code>---</code> 等内部标记。</li>
+    <li>工具返回的具体值（台架号/架构/时间/BagId）由卡片单独呈现，正文只写一句总结 + 下一步提示。</li>
+    <li>单轮最多 2 次工具调用；台架号 vs 架构名格式区分；dry_run 字段按用户原话字面填，不语义重写。</li>
+  </ul>
+
+  <h3>4.4 不变量</h3>
+  <table>
+    <thead><tr><th>约束</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>&lt;100ms</td><td>OCL 全程无网络调用（card_builder 纯 CPU）</td></tr>
+      <tr><td>不抛异常</td><td>任何处理错误 fail-open，返回原文，不阻断发送</td></tr>
+      <tr><td>不记录正文</td><td>metrics/log 只存 ID 与延迟，绝不存用户消息内容</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============ 5. 自进化 ============ -->
+<section id="evo">
+  <h2><span class="num">5</span>Hermes 自进化：约束与方向控制</h2>
+  <p class="lead">让系统跨会话「记住」与「自检」，但<strong>方向被严格收束</strong>：只允许往「更懂用户、更早预警、产出只读建议」走，绝不允许触碰安全/权限/业务规则。</p>
+
+  <h3>5.1 三阶段现状</h3>
+  <table>
+    <thead><tr><th>阶段</th><th>模块</th><th>状态</th><th>作用</th></tr></thead>
+    <tbody>
+      <tr><td>Phase 1 跨会话记忆</td><td><code>bot/dmz_memory.py</code></td><td><span class="pill on">已接线</span></td><td>实现 hermes <code>MemoryProvider</code>，每用户记忆常查架构/场景、最近工具调用模式、累计错误模式</td></tr>
+      <tr><td>Phase 2 反馈回路</td><td><code>bot/feedback.py</code></td><td><span class="pill on">已接线</span></td><td>卡片按钮回调记录「操作模式」（仅元数据）落盘 <code>data/feedback/operations</code>，供周报分析</td></tr>
+      <tr><td>Phase 3 Curator</td><td><code>bot/curator_runner.py</code></td><td><span class="pill ro">已接线 · 只读</span></td><td>后台巡检工具 schema / Skill / 失败模式 → <strong>仅</strong>产出建议到 <code>data/curator/suggestions</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.2 Phase 1 记忆：接线方式</h3>
+  <p>hermes 只从 <code>plugins/memory/</code> 发现 provider；我们的 provider 在 repo 内，故不走插件发现，而在 <code>agent_pool.get_or_create()</code> 构造 <code>AIAgent</code> 后<strong>直接挂载</strong>：</p>
+  <pre><code>AIAgent(..., user_id=user_id)        # 硬前提：不传 user_id 则记忆永不落盘
+  └─ _wire_dmz_memory(agent, session_id, user_id)
+        MemoryManager → add_provider(DMZMemoryProvider()) → initialize(...)
+hermes 运行时自动：每轮 prefetch（召回）+ 每轮末 sync_turn（写回）</code></pre>
+  <p>存储：<code>$DMZ_MEMORY_HOME/dmz_memory/&lt;user_hash16&gt;/memory.json</code>（默认 <code>data/</code>，挂载进容器卷，跨重启持久化）。</p>
+
+  <h3>5.3 安全铁律（不可变）</h3>
+  <div class="note r">
+    <strong>记忆 / 反馈层绝不存：</strong>❌ emailAddress / API key / 密码 / cookie ❌ 完整用户消息原文（仅元数据：工具名 + 参数 key 名 + 成功/失败）❌ OCL 安全规则或权限配置。<br>
+    <strong>必做：</strong>✅ 30 天 TTL 自动过期 ✅ 匿名用户（无 open_id）不落盘 ✅ 落盘前 <code>_strip_sensitive</code> 双重剥敏。
+  </div>
+
+  <h3>5.4 自进化「方向控制」：Curator 只读护栏</h3>
+  <p>Phase 3 的核心是<strong>限制自进化能改什么</strong>。Curator 是只读 wrapper：</p>
+  <ul>
+    <li><strong>只产出建议</strong>，写到 <code>data/curator/suggestions/&lt;日期&gt;.jsonl</code>（带 hash + <code>status:pending</code>），<strong>从不</strong>自动改任何代码。</li>
+    <li>巡检范围：工具 schema（空描述 / schema 泄漏 email）、Skill（过期 / 缺红旗段）、反馈失败模式（高频错误 ≥3 次）。</li>
+    <li><strong>BLOCKED_PATHS</strong> 显式禁改：<code>dmz_memory.py</code>、<code>feedback.py</code>、<code>curator_runner.py</code>、<code>ocl/permission.py</code>、<code>ocl/format_control.py</code>、<code>ocl/content_filter.py</code>、<code>ocl/length_limiter.py</code>、<code>config/settings.py</code>——即<strong>安全/权限/输出边界/配置永不进入自进化回路</strong>。</li>
+    <li>触发方式：搭在 <code>agent-warmup</code> 后台线程上，内部限流 24h/次，失败静默，绝不影响服务。</li>
+  </ul>
+  <div class="note g"><strong>设计意图：</strong>自进化只能让系统「更好用」（更准的工具描述、更早的失败预警），不能让它「自我授权」或「放松边界」。人始终在建议→采纳的回路中。</div>
+</section>
+
+<!-- ============ 6. 后续 ============ -->
+<section id="next">
+  <h2><span class="num">6</span>后续开发方向</h2>
+
+  <h3>6.1 体验与性能</h3>
+  <ul>
+    <li><strong>流式 UX 重做</strong>：此前 streaming 占位（typing → 逐字 edit_message）已实现后按需求回退，保留了启动预热。可在确认 UX 后重新接入，把感知延迟从 30s+ 降到 ~2s。</li>
+    <li><strong>VLM 域卡片化</strong>：当前 VLM 走纯文本/通用卡片，可仿台架域做 Bag/帧的确定性数据块与跳转按钮。</li>
+    <li>快速路径覆盖更多查询意图（当前以台架查询为主）。</li>
+  </ul>
+
+  <h3>6.2 自进化闭环（Phase 2 / 3 深化）</h3>
+  <ul>
+    <li><strong>周报分析</strong>：定期跑 <code>feedback.weekly_report()</code>，把高频失败模式转成 prompt / 工具描述改进项。</li>
+    <li><strong>Curator 建议审阅闭环</strong>：给 <code>data/curator/suggestions</code> 加人工「采纳 / 驳回」流程（仍由人决定，护栏不变）。</li>
+    <li>把 Phase 3 升级为读 <code>agent/curator.py</code>，仅生成 Skill / 工具描述建议。</li>
+  </ul>
+
+  <h3>6.3 健壮性与运维</h3>
+  <ul>
+    <li><strong>内容过滤增强</strong>：当前仅政治敏感 + 密钥两类正则，覆盖面窄；生产前需扩充规则集。</li>
+    <li><strong>session_map TTL</strong>：异常销毁的 Agent 映射目前依赖 LRH 上限兜底，可加主动 TTL 清理。</li>
+    <li><strong>告警接入</strong>：把 <code>/health</code> 指标（重连率、错误率、p95 延迟）接入监控。</li>
+    <li><strong>文档对齐</strong>：旧 <code>README/architecture/deployment</code> 仍残留早期「订单域」描述，需同步到本说明的双业务域模型。</li>
+  </ul>
+
+  <div class="note"><strong>不变量提醒（后续开发须守）：</strong>WS 回调立即返回；每 <code>user_id</code> 严格一个 Agent 实例；<code>MINIMAX_API_KEY</code> 不入日志；
+  <code>max_iterations=30</code> / <code>timeout=120s</code> 为硬上限；台架域注入 email、VLM 域不注入；记忆层不存敏感字段。</div>
+</section>
+
+<footer>
+  DMZ 智能体 · 项目说明 ｜ 内容依据当前代码与 <code>docs/superpowers/</code> 设计文档梳理 ｜ 单元测试：358 全绿
+</footer>
+
+</main>
+</div>
+</body>
+</html>

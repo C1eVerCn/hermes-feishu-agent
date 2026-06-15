@@ -20,6 +20,8 @@ python main.py #启动机器人（WebSocket + 健康检查 HTTP）
 ```bash
 python main.py #启动机器人
 pytest tests/unit/ #单元测试（无网络）
+python scripts/selfcheck.py # 一键自动化自检（测试+编译+导入+配置漂移+文档/接线）
+scripts/autofix.sh # 自检 + 调 Claude Code headless 回环修复至全绿
 curl localhost:8080/health # 检查 ws_connected、metrics
 ```
 

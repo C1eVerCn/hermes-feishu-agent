@@ -10,7 +10,8 @@ Single source of truth for all configuration. Reads `.env` at import time, valid
 
 - Fail fast: if a required var is missing at import time, raise `RuntimeError` with the var name and a hint — do not use a default that masks a misconfiguration
 - Required vars: `FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `MINIMAX_API_KEY`
-- Optional vars with defaults: `MINIMAX_BASE_URL` (→ `https://api.minimax.chat/v1`), `MINIMAX_MODEL` (→ `MiniMax-Text-01`), `AGENT_MAX_ITERATIONS` (→ `30`), `AGENT_TIMEOUT_SECONDS` (→ `120`), `AGENT_POOL_MAX_SIZE` (→ `100`), `HTTP_PORT` (→ `8080`)
+- Optional vars with defaults: `MINIMAX_BASE_URL` (→ `https://api.minimax.chat/v1`), `MINIMAX_MODEL` (→ `MiniMax-Text-01`), `AGENT_MAX_ITERATIONS` (→ `30`), `AGENT_TIMEOUT_SECONDS` (→ `120`), `AGENT_POOL_MAX_SIZE` (→ `100`), `HTTP_PORT` (→ `8088`), `BENCH_API_BASE_URL` (→ `http://localhost:9013`), `VLM_API_BASE_URL` (→ `http://localhost:9014`)
+- JWT vars read directly in `bench_tools/jwt_auth.py` (not via settings): `BENCH_JWT_SECRET`, `BENCH_JWT_SUB` (dev defaults if unset)
 - API keys must never appear in `repr()` or `str()` of the settings object — mask them as `***`
 
 ## What NOT to do
