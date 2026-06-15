@@ -5,6 +5,7 @@ import time
 import contextvars
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta
+from typing import Optional
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
@@ -71,8 +72,11 @@ _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
 _MY_PERMS = re.compile(r'我的权限|查看.*权限|我的角色')
 # Admin command: "设置角色 ou_xxx 2"
 _ADMIN_SET_ROLE = re.compile(r'^设置角色\s+(\S+)\s+([123])$')
+# Admin command: "查看用户" (all) / "查看用户 待审核|普通用户|调度员|管理员" / "查看用户 ou_xxx"
+_ADMIN_LIST_USERS = re.compile(r'^查看用户(?:\s+(\S+))?$')
 
 _ROLE_NAME = {0: "非平台用户", 1: "普通用户", 2: "调度员", 3: "管理员"}
+_ROLE_BY_NAME = {"待审核": 0, "非平台用户": 0, "普通用户": 1, "调度员": 2, "管理员": 3}
 
 
 def _admin_ids() -> set[str]:
@@ -82,6 +86,52 @@ def _admin_ids() -> set[str]:
 
 def _is_admin(user_id: str) -> bool:
     return user_id in _admin_ids() or identity.role_of(user_id) == 3
+
+
+def _resolve_role_with_env_admin(admin, user_id: str, role: int) -> int:
+    """Elevate env-configured admins to role 3 and persist it, so the store
+    stays the single source of truth across turns. Returns the effective role."""
+    if role < 3 and user_id in _admin_ids():
+        admin.set_role(user_id, 3, operator="ocl_admin_env",
+                       note="auto-elevated from OCL_ADMIN_USER_IDS")
+        return 3
+    return role
+
+
+# Capability descriptions per role — mirror _handle_identity_query so the LLM
+# and the deterministic "我的权限" reply tell the same story.
+_ROLE_CAPS = {
+    1: "可查询台架架构/可用台架/VLM 公开数据、预约/取消/归还台架、查询自己的预约记录。",
+    2: "在普通用户基础上，可审批本组台架预约、查询本组待审批列表、下载 VLM 元数据。",
+    3: "拥有全部权限：跨组审批、查询全部待审批、触发 VLM 同步等系统级操作。",
+}
+
+
+def _identity_preamble(user_id: str, role: int, name: str) -> str:
+    """Build a server-verified identity block to prepend to the user's message
+    before it reaches the LLM.
+
+    The agent's system prompt is built once at construction and is identity-blind;
+    the pooled agent is shared across turns and a user's role can change at any
+    time (admin 设置角色). So identity MUST be injected per-turn here, sourced from
+    the same authority that enforces permissions (identity.role_of / IdentityAdmin)
+    — never let the LLM guess the caller's role.
+
+    We deliberately do NOT include email/open_id (the bench API injects email
+    server-side; the LLM never needs PII)."""
+    role_name = _ROLE_NAME.get(role, "未知")
+    caps = _ROLE_CAPS.get(role, "")
+    who = f"当前对话用户：{name}（角色：{role_name}，role={role}）。" if name \
+        else f"当前对话用户角色：{role_name}（role={role}）。"
+    return (
+        "［系统已核验的用户身份，以此为准，不要自行推断或质疑］\n"
+        f"{who}\n"
+        f"权限范围：{caps}\n"
+        "回答涉及「你是谁/我的权限/我能做什么」时，必须依据上述角色，"
+        "不得默认对方是普通用户。\n"
+        "———\n"
+        "用户消息："
+    )
 
 
 def _handle_identity_query(text: str, user_id: str) -> str:
@@ -118,7 +168,55 @@ def _handle_admin_command(text: str, user_id: str) -> str:
         if not ok:
             return f"设置失败：{msg}"
         return f"已设置 {target} 的角色为 {_ROLE_NAME[role]}。"
+    m = _ADMIN_LIST_USERS.match(text)
+    if m:
+        return _format_user_list(m.group(1))
     return ""
+
+
+def _format_user_list(filter_arg: str | None) -> str:
+    """Render the user roster for the `查看用户` admin command.
+
+    filter_arg may be: None (all users), a role name (待审核/普通用户/调度员/
+    管理员), or a specific open_id. Emails/names ARE shown here because this is
+    an admin-only management view (gated by _is_admin in the caller)."""
+    admin = get_identity_admin()
+    users = admin.list_all()
+    if not users:
+        return "当前没有任何用户记录。"
+
+    # Specific open_id lookup
+    if filter_arg and filter_arg in users:
+        rec = users[filter_arg]
+        return (f"用户 {filter_arg}：\n"
+                f"• 角色：{_ROLE_NAME.get(int(rec.get('role', 0)), '未知')}\n"
+                f"• 姓名：{rec.get('name', '') or '(未知)'}\n"
+                f"• 邮箱：{rec.get('email', '') or '(未知)'}\n"
+                f"• 建档方式：{rec.get('registered_via', '') or '(未知)'}")
+
+    # Role-name filter
+    role_filter = _ROLE_BY_NAME.get(filter_arg) if filter_arg else None
+    if filter_arg and role_filter is None and filter_arg not in users:
+        return (f"未找到用户或角色「{filter_arg}」。\n"
+                "用法：「查看用户」全部 / 「查看用户 调度员」按角色 / 「查看用户 ou_xxx」按 open_id。")
+
+    lines: list[str] = []
+    by_role: dict[int, list[str]] = {0: [], 1: [], 2: [], 3: []}
+    for oid, rec in users.items():
+        r = int(rec.get("role", 0))
+        if role_filter is not None and r != role_filter:
+            continue
+        by_role.setdefault(r, []).append(
+            f"  • {rec.get('name', '') or '(无名)'} | {rec.get('email', '') or '(无邮箱)'} | {oid}")
+
+    total = sum(len(v) for v in by_role.values())
+    header = f"📋 用户列表（共 {total} 人）" + (f"，筛选：{filter_arg}" if filter_arg else "")
+    lines.append(header)
+    for r in (3, 2, 1, 0):
+        if by_role.get(r):
+            lines.append(f"\n【{_ROLE_NAME[r]}】{len(by_role[r])} 人")
+            lines.extend(by_role[r])
+    return "\n".join(lines)
 
 
 def start_consumer() -> None:
@@ -185,6 +283,11 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
                 note=f"feishu returned email {email}",
             )
     role = admin.get_role(user_id)
+    # Env-configured admins (OCL_ADMIN_USER_IDS) are role 3 everywhere, not just
+    # for admin commands. Without this, an operator listed in the env var but
+    # whose store record is still role=1 would be told "you are 普通用户" by the
+    # LLM and gated out of scheduler/admin tools.
+    role = _resolve_role_with_env_admin(admin, user_id, role)
     if admin.get(user_id):
         email = admin.get(user_id).get("email", "") or email
         name = admin.get(user_id).get("name", "") or name
@@ -284,8 +387,13 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         # get_current_email() 拿到空串，POST body 缺 emailAddress。
         ctx = contextvars.copy_context()
         tool_capture.clear(session_id)
+        # Inject server-verified identity so the LLM knows the caller's role
+        # (the construction-time system prompt is identity-blind and the agent
+        # is pooled/shared across turns). Permission enforcement is independent
+        # (open_id-based, double-defense) — this only fixes what the LLM *says*.
+        agent_input = _identity_preamble(user_id, role, name) + text
         t1 = time.monotonic()
-        future = _executor.submit(ctx.run, agent.chat, text)
+        future = _executor.submit(ctx.run, agent.chat, agent_input)
         log.info("trace[executor.submit] took=%.2fs", time.monotonic() - t1)
         t2 = time.monotonic()
         response: str = future.result(timeout=settings.AGENT_TIMEOUT_SECONDS)
@@ -492,29 +600,83 @@ _RESERVE_TASK_RE = re.compile(r'任务[是为的话]?\s*([^，,。;；\n]+?)(?=(
 _RESERVE_PURPOSE_RE = re.compile(r'目的[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|$))')
 
 
-def _parse_chinese_time(text: str, now: datetime) -> Optional[datetime]:
-    """Parse a Chinese time expression to an absolute datetime. Returns
-    None if ambiguous. Supports: 今天/明天/后天 + 上午/下午/晚上 + N点,
-    上午/下午/晚上 + N点 (assumes today), X月X号 + 上午/下午/晚上 + N点,
-    今晚/明早/明晚 + N点 (defaults to 9:00 if no N given).
+_CN_DIGITS = {'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,
+              '五': 5, '六': 6, '七': 7, '八': 8, '九': 9}
+_CN_NUM_RE = re.compile(r'[零〇一二两三四五六七八九十]+')
+_PERIOD_RE = re.compile(r'(上午|下午|早上|晚上|中午|夜里|凌晨)')
+
+
+def _cn_run_to_int(run: str):
+    """Convert a run of Chinese numeral chars (含 十) to an int, or None."""
+    if run == '十':
+        return 10
+    if '十' in run:
+        left, _, right = run.partition('十')
+        tens = _CN_DIGITS.get(left, 1) if left else 1
+        ones = _CN_DIGITS.get(right, 0) if right else 0
+        return tens * 10 + ones
+    if all(c in _CN_DIGITS for c in run):
+        return int(''.join(str(_CN_DIGITS[c]) for c in run))
+    return None
+
+
+def _cn_to_arabic(text: str) -> str:
+    """把中文数字串转成阿拉伯数字，让时间正则能处理「下午五点」「十一点半」。
+    只改数字字符，其余原样（仅作用于已切出的时间片段，不碰任务/目的文本）。"""
+    return _CN_NUM_RE.sub(
+        lambda m: (lambda v: str(v) if v is not None else m.group(0))(_cn_run_to_int(m.group(0))),
+        text,
+    )
+
+
+def _period_of(text: str) -> Optional[str]:
+    m = _PERIOD_RE.search(text)
+    return m.group(1) if m else None
+
+
+def _minute_of(min_str, half) -> int:
+    if half:
+        return 30
+    if min_str:
+        return int(min_str)
+    return 0
+
+
+def _apply_period(hour: int, period: Optional[str]) -> int:
+    """Shift to 24h given a period word. 凌晨/早上/上午/中午 stay AM; 下午/晚上/夜里
+    shift to PM. 12 is left as-is (caller's call for noon/midnight)."""
+    if period == "下午" and hour < 12:
+        return hour + 12
+    if period in ("晚上", "夜里") and hour < 12 and hour != 0:
+        return hour + 12
+    return hour
+
+
+def _parse_chinese_time(text: str, now: datetime,
+                        inherit_period: Optional[str] = None) -> Optional[datetime]:
+    """Parse a Chinese time expression to an absolute datetime. Returns None if
+    ambiguous. Supports 今天/明天/后天 + 上午/下午/晚上 + N点[N分/半], HH:MM,
+    X月X号, 今晚/明早 (default 9:00), and Chinese numerals (下午五点 → 17:00).
+
+    inherit_period: when a range's END omits 上午/下午, the caller passes the
+    START's period so 「下午2点到4点」's end resolves to 16:00, not 04:00.
     """
-    # Most specific first: relative day + period + N点
+    text = _cn_to_arabic(text)
+
+    # relative day + period + N点[N分/半]
     m = re.search(
-        r'(今|明|后)天?(?:(上午|下午|早上|晚上|中午|夜里|凌晨))?\s*(\d{1,2})\s*[点时:：]',
+        r'(今|明|后)天?(?:(上午|下午|早上|晚上|中午|夜里|凌晨))?\s*'
+        r'(\d{1,2})\s*[点时:：](?:\s*(\d{1,2}))?\s*分?\s*(半)?',
         text,
     )
     if m:
-        day_word, period, hour_str = m.groups()
+        day_word, period, hour_str, min_str, half = m.groups()
         delta_days = {"今": 0, "明": 1, "后": 2}[day_word]
-        hour = int(hour_str)
-        if period in ("下午",) and hour < 12:
-            hour += 12
-        elif period in ("晚上", "夜里", "凌晨") and hour < 12 and hour != 0:
-            hour += 12
+        hour = _apply_period(int(hour_str), period or inherit_period)
         return (now + timedelta(days=delta_days)).replace(
-            hour=hour, minute=0, second=0, microsecond=0)
+            hour=hour, minute=_minute_of(min_str, half), second=0, microsecond=0)
 
-    # Bare day word: "明早" / "今晚" / "明晨" / "明夜" (no time)
+    # Bare day word: "明早" / "今晚" / "明晨" / "明夜" (no time) → default 9:00.
     # Use (?<![午夜凌]) to skip when the period char is the start of a
     # longer period word like 晚上/夜里/凌晨.
     default_day_match = re.search(r'(?<![午夜凌])(今|明|后)天?(早|晚|晨|夜)(?![一-鿿])', text)
@@ -523,40 +685,34 @@ def _parse_chinese_time(text: str, now: datetime) -> Optional[datetime]:
         delta_days = {"今": 0, "明": 1, "后": 2}[day_word]
         return (now + timedelta(days=delta_days)).replace(hour=9, minute=0, second=0, microsecond=0)
 
-    # Specific date + period + N点
+    # Specific date + period + N点[N分/半]
     m = re.search(
-        r'(\d{1,2})\s*月\s*(\d{1,2})\s*号?\s*(?:(上午|下午|早上|晚上|中午|夜里|凌晨))?\s*(\d{1,2})\s*[点时:：]?',
+        r'(\d{1,2})\s*月\s*(\d{1,2})\s*号?\s*(?:(上午|下午|早上|晚上|中午|夜里|凌晨))?\s*'
+        r'(\d{1,2})\s*[点时:：]?(?:\s*(\d{1,2}))?\s*分?\s*(半)?',
         text,
     )
     if m:
-        month, day, period, hour_str = m.groups()
-        month, day, hour = int(month), int(day), int(hour_str)
-        if period in ("下午",) and hour < 12:
-            hour += 12
-        elif period in ("晚上", "夜里", "凌晨") and hour < 12 and hour != 0:
-            hour += 12
-        year = now.year
+        month, day, period, hour_str, min_str, half = m.groups()
+        hour = _apply_period(int(hour_str), period or inherit_period)
         try:
-            return datetime(year, month, day, hour, 0, 0)
+            return datetime(now.year, int(month), int(day), hour,
+                            _minute_of(min_str, half), 0)
         except ValueError:
             return None
 
-    # Bare period + N点 (no day word) — e.g. "晚上8点" / "下午5点" / "8点".
+    # Bare period + N点[N分/半] (no day word) — e.g. "晚上8点" / "下午5点半" / "17:30".
     # Resolves to the `now` calendar day. Callers parsing a RANGE re-anchor
-    # the end to the start's day (see _try_reserve_fast_path) so
-    # "从明天下午5点到晚上8点" means tomorrow 20:00, not today 20:00.
+    # the end to the start's day (see _try_reserve_fast_path).
     m = re.search(
-        r'(上午|下午|早上|晚上|中午|夜里|凌晨)?\s*(\d{1,2})\s*[点时:：]',
+        r'(上午|下午|早上|晚上|中午|夜里|凌晨)?\s*'
+        r'(\d{1,2})\s*[点时:：](?:\s*(\d{1,2}))?\s*分?\s*(半)?',
         text,
     )
     if m:
-        period, hour_str = m.groups()
-        hour = int(hour_str)
-        if period == "下午" and hour < 12:
-            hour += 12
-        elif period in ("晚上", "夜里", "凌晨") and hour < 12 and hour != 0:
-            hour += 12
-        return now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        period, hour_str, min_str, half = m.groups()
+        hour = _apply_period(int(hour_str), period or inherit_period)
+        return now.replace(hour=hour, minute=_minute_of(min_str, half),
+                           second=0, microsecond=0)
 
     return None
 
@@ -600,8 +756,16 @@ def _try_reserve_fast_path(text: str, user_id: str, email: str):
     bench_no = bench_match.group(1)
 
     # ── Stage 2: extract time range ──────────────────────────────────────
+    # 「从/自」可选：很多用户直接说「明天5点到8点」不带『从』。为避免在没有
+    # 『从』锚点时把「预约CT001，明天…」整段误当起始文本，要求起始片段以
+    # 时间关键词（今/明/后 · 上午/下午… · N月 · N点/N:）打头。
     range_match = re.search(
-        r'(?:从|自)\s*(.+?)\s*(?:到|至|到|~|-)\s*(.+?)(?=[，,。;；\n]|任务|目的|$)',
+        r'(?:从|自)?\s*'
+        r'((?:今|明|后|上午|下午|早上|晚上|中午|夜里|凌晨|'
+        r'[\d零〇一二两三四五六七八九十]+\s*月|'
+        r'[\d零〇一二两三四五六七八九十]+\s*[点时:：])[^，,。;；\n]*?)'
+        r'\s*(?:到|至|~|-|—|–)\s*'
+        r'(.+?)(?=[，,。;；\n]|任务|目的|$)',
         norm,
     )
     if not range_match:
@@ -615,7 +779,10 @@ def _try_reserve_fast_path(text: str, user_id: str, email: str):
     # ── Stage 3: parse the times into datetimes ─────────────────────────
     now_cn = datetime.now() + timedelta(hours=8)
     start_dt = _parse_chinese_time(start_text, now_cn)
-    end_dt = _parse_chinese_time(end_text, now_cn)
+    # End inherits the start's 上午/下午 when it omits its own period, so
+    # 「从今天下午2点到4点」→ end 16:00, not 04:00.
+    end_inherit = None if _period_of(end_text) else _period_of(start_text)
+    end_dt = _parse_chinese_time(end_text, now_cn, inherit_period=end_inherit)
     # A range end without an explicit day inherits the start's calendar day:
     # "从明天下午5点到晚上8点" → end is tomorrow 20:00, not today 20:00.
     if end_dt and start_dt and not _has_day_marker(end_text):

@@ -93,6 +93,110 @@ def test_set_role_bad_format_returns_empty():
     assert handler._handle_admin_command("设置角色 ou_target 9", "ou_admin") == ""
 
 
+# ── Admin list-users (查看用户) ─────────────────────────────────────────────────
+
+def _admin_with_users(tmp_path, monkeypatch):
+    import importlib
+    import bot.identity_admin as ia_mod
+    importlib.reload(ia_mod)
+    from bot.identity_admin import IdentityAdmin
+    admin_inst = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(ia_mod, "get_admin", lambda: admin_inst)
+    admin_inst.set_role("ou_admin", 3, operator="root")
+    admin_inst.auto_register("ou_zhang", email="zhang@x.com", name="张三")
+    admin_inst.set_role("ou_zhang", 1, operator="root")
+    admin_inst.auto_register("ou_diao", email="diao@x.com", name="调度李")
+    admin_inst.set_role("ou_diao", 2, operator="root")
+    admin_inst.auto_register("ou_pending", email="p@x.com", name="待审王")
+    handler = _make_handler()
+    monkeypatch.setattr(handler, "get_identity_admin", lambda: admin_inst)
+    return handler
+
+
+def test_list_users_all(tmp_path, monkeypatch):
+    handler = _admin_with_users(tmp_path, monkeypatch)
+    out = handler._handle_admin_command("查看用户", "ou_admin")
+    assert "用户列表" in out
+    assert "张三" in out and "调度李" in out
+    assert "管理员" in out and "普通用户" in out and "非平台用户" in out
+
+
+def test_list_users_role_filter(tmp_path, monkeypatch):
+    handler = _admin_with_users(tmp_path, monkeypatch)
+    out = handler._handle_admin_command("查看用户 调度员", "ou_admin")
+    assert "调度李" in out
+    assert "张三" not in out
+
+
+def test_list_users_by_open_id(tmp_path, monkeypatch):
+    handler = _admin_with_users(tmp_path, monkeypatch)
+    out = handler._handle_admin_command("查看用户 ou_zhang", "ou_admin")
+    assert "张三" in out
+    assert "zhang@x.com" in out
+
+
+def test_list_users_rejected_for_non_admin():
+    handler = _make_handler()
+    assert handler._handle_admin_command("查看用户", "ou_user") == ""
+
+
+# ── Identity preamble injected into the LLM (role-awareness fix) ─────────────
+
+def test_identity_preamble_states_admin_role():
+    handler = _make_handler()
+    pre = handler._identity_preamble("ou_admin", 3, "王五")
+    assert "role=3" in pre
+    assert "管理员" in pre
+    assert "王五" in pre
+    assert pre.endswith("用户消息：")
+    # must NOT leak open_id into the LLM context
+    assert "ou_admin" not in pre
+
+
+def test_identity_preamble_role1_no_name():
+    handler = _make_handler()
+    pre = handler._identity_preamble("ou_user", 1, "")
+    assert "role=1" in pre
+    assert "普通用户" in pre
+
+
+def test_identity_preamble_prepended_before_user_text():
+    """The agent must receive identity + the original text, in that order."""
+    handler = _make_handler()
+    pre = handler._identity_preamble("ou_admin", 3, "王五")
+    composed = pre + "我是管理员权限"
+    assert composed.startswith("［系统已核验")
+    assert composed.endswith("用户消息：我是管理员权限")
+
+
+# ── Env-admin role elevation (OCL_ADMIN_USER_IDS → role 3 everywhere) ────────
+
+def test_env_admin_elevated_to_role3(tmp_path, monkeypatch):
+    handler = _make_handler()
+    monkeypatch.setattr(handler, "_admin_ids", lambda: {"ou_envadmin"})
+    from bot.identity_admin import IdentityAdmin
+    admin = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    # store says role=1, but the env lists them as admin
+    admin.auto_register("ou_envadmin", email="a@x.com", name="管理者")
+    admin.set_role("ou_envadmin", 1, operator="test")
+    role = handler._resolve_role_with_env_admin(admin, "ou_envadmin", 1)
+    assert role == 3
+    # persisted to the store (single source of truth for later turns)
+    assert admin.get_role("ou_envadmin") == 3
+
+
+def test_non_env_admin_role_unchanged(tmp_path, monkeypatch):
+    handler = _make_handler()
+    monkeypatch.setattr(handler, "_admin_ids", lambda: {"ou_someoneelse"})
+    from bot.identity_admin import IdentityAdmin
+    admin = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    admin.auto_register("ou_normal", email="n@x.com", name="普通")
+    admin.set_role("ou_normal", 1, operator="test")
+    role = handler._resolve_role_with_env_admin(admin, "ou_normal", 1)
+    assert role == 1
+    assert admin.get_role("ou_normal") == 1
+
+
 # ── Identity gate ───────────────────────────────────────────────────────────────
 
 def test_non_platform_user_reply_constant():
@@ -408,6 +512,38 @@ class TestParseChineseTime:
         assert self._t("今天") is None  # day only, no time
         assert self._t("几点") is None
 
+    def test_early_morning_is_am_not_pm(self):
+        # 凌晨 = 0–5 AM, must NOT be shifted +12 (regression: fuzz engine found
+        # "凌晨2点" parsed as 14:00). 晚上/夜里 still shift.
+        assert self._t("明天凌晨2点").hour == 2
+        assert self._t("今天凌晨5点").hour == 5
+        assert self._t("明天晚上8点").hour == 20   # 晚上 still +12
+        assert self._t("明天夜里11点").hour == 23   # 夜里 still +12
+
+    def test_chinese_numerals(self):
+        # 中文数字时间（fuzz engine: 「下午五点」曾无法识别）
+        assert self._t("明天下午五点").hour == 17
+        assert self._t("后天晚上八点").hour == 20
+        dt = self._t("明天上午十一点")
+        assert dt.hour == 11
+        assert self._t("明天下午两点").hour == 14  # 两 = 2
+
+    def test_minutes_preserved(self):
+        # 分钟不再被丢弃（fuzz engine: 17:30 / 5点半 曾解析成整点）
+        dt = self._t("明天17:30")
+        assert dt.hour == 17 and dt.minute == 30
+        dt = self._t("明天下午5点半")
+        assert dt.hour == 17 and dt.minute == 30
+        dt = self._t("明天下午5点30分")
+        assert dt.hour == 17 and dt.minute == 30
+
+    def test_end_inherits_start_period(self):
+        # 范围结束继承开始的上午/下午（「下午2点到4点」→ end 16:00）
+        from bot.handler import _parse_chinese_time
+        assert self._t("4点").hour == 4                       # 无继承 → 04:00
+        dt = _parse_chinese_time("4点", self.now, inherit_period="下午")
+        assert dt.hour == 16                                  # 继承下午 → 16:00
+
     def test_bare_period_time_no_day_word(self):
         """Day-less '晚上8点' / '下午5点' must resolve (to the `now` day) —
         the docstring promised this but no regex implemented it.
@@ -450,6 +586,26 @@ class TestReservationRangeDayInheritance:
         assert "20:00:00" in a["endTime"]
         # Same calendar day — end is not stuck on "today".
         assert a["startTime"][:10] == a["endTime"][:10]
+
+    def test_range_without_从_prefix(self, monkeypatch):
+        """'明天5点到8点'（无『从』）也要能抽出范围（fuzz engine: 60 条曾漏抽）。"""
+        a = self._args("预约CT001，明天下午5点到后天晚上8点，任务是测试，目的是压测", monkeypatch)
+        assert a["benchNo"] == "CT001"
+        assert "17:00:00" in a["startTime"]
+        assert "20:00:00" in a["endTime"]
+
+    def test_range_end_inherits_period(self, monkeypatch):
+        """'从今天下午2点到4点' → end 16:00（继承下午），不是次日 04:00。"""
+        a = self._args("预约TJ001，从今天下午2点到4点，任务是A，目的是B", monkeypatch)
+        assert "14:00:00" in a["startTime"]
+        assert "16:00:00" in a["endTime"]
+        assert a["startTime"][:10] == a["endTime"][:10]
+
+    def test_range_chinese_numerals(self, monkeypatch):
+        """中文数字范围 '下午五点到晚上八点'。"""
+        a = self._args("预约CT001，从明天下午五点到后天晚上八点，任务是A，目的是B", monkeypatch)
+        assert "17:00:00" in a["startTime"]
+        assert "20:00:00" in a["endTime"]
 
 
 class TestReservationFastPath:

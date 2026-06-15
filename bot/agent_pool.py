@@ -80,6 +80,20 @@ def _warmup_agent(agent) -> None:
     except Exception:
         log.exception("agent_warmup_failed")
 
+    # Phase 3 self-evolution: piggyback the read-only Curator review on the
+    # background warmup thread (off the request hot path). It is rate-limited
+    # internally to once / 24h and only ever writes suggestions to
+    # data/curator/suggestions/ — never touches business code or OCL rules.
+    # Best-effort: failure here must not affect agent serving.
+    try:
+        from bot.curator_runner import maybe_run_dmz_curator
+        result = maybe_run_dmz_curator()
+        if result:
+            log.info("dmz_curator ran suggestions=%d file=%s",
+                     result.get("suggestions_count", 0), result.get("output_file", ""))
+    except Exception:
+        log.exception("dmz_curator invocation failed (non-fatal)")
+
 
 def _now_cn() -> str:
     """Return current CN-time as 'YYYY-MM-DD HH:MM:SS (周X)'. Refreshed per

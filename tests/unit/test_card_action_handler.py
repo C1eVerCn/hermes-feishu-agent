@@ -73,3 +73,31 @@ def test_return_without_location_requests_followup():
 def test_unknown_action_rejected():
  toast, card = cah.handle("ou_user", {"action": "nuke", "benchNo": "TJ001"})
  assert "不支持" in toast
+
+
+def test_card_action_records_feedback():
+ """Phase 2: a successful card action records an operation event (metadata
+ only — no message text, no email)."""
+ calls = []
+ with patch.object(cah.handlers, "cancel_reservation",
+                   return_value='{"code":200,"message":"取消预约成功","data":null}'), \
+      patch.object(cah.feedback, "record_card_action",
+                   side_effect=lambda *a, **k: calls.append((a, k))):
+  cah.handle("ou_user", {"action": "cancel", "benchNo": "TJ001"})
+ assert len(calls) == 1
+ args, _ = calls[0]
+ # signature: (user_id, action, tool, args_keys, success, error=...)
+ assert args[0] == "ou_user"
+ assert args[1] == "cancel"
+ assert args[2] == "cancel_reservation"
+ assert args[4] is True  # success
+
+
+def test_feedback_failure_does_not_break_callback():
+ """A feedback write error must never break the card callback."""
+ with patch.object(cah.handlers, "cancel_reservation",
+                   return_value='{"code":200,"message":"取消预约成功","data":null}'), \
+      patch.object(cah.feedback, "record_card_action",
+                   side_effect=RuntimeError("disk full")):
+  toast, card = cah.handle("ou_user", {"action": "cancel", "benchNo": "TJ001"})
+ assert "取消" in toast

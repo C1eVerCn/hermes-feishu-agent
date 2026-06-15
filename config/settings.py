@@ -27,7 +27,7 @@ class Settings:
     MINIMAX_BASE_URL: str = field(default_factory=lambda: _optional("MINIMAX_BASE_URL", "https://api.minimax.chat/v1"))
     MINIMAX_MODEL: str = field(default_factory=lambda: _optional("MINIMAX_MODEL", "MiniMax-Text-01"))
 
-    AGENT_MAX_ITERATIONS: int = field(default_factory=lambda: int(os.getenv("AGENT_MAX_ITERATIONS", "5")))
+    AGENT_MAX_ITERATIONS: int = field(default_factory=lambda: int(os.getenv("AGENT_MAX_ITERATIONS", "30")))
     AGENT_TIMEOUT_SECONDS: int = field(default_factory=lambda: int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")))
     AGENT_POOL_MAX_SIZE: int = field(default_factory=lambda: int(os.getenv("AGENT_POOL_MAX_SIZE", "100")))
 

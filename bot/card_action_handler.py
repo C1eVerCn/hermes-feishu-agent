@@ -9,6 +9,7 @@ from ocl import identity, permission
 from ocl.tool_guard import set_current_email, set_current_user
 from bench_tools import handlers
 from bot import reservation_store
+from bot import feedback
 from feishu import notify
 
 log = logging.getLogger(__name__)
@@ -127,6 +128,17 @@ def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | No
         parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         parsed = {"error": raw}
+
+    # Phase 2 self-evolution: record the operation pattern (no message text,
+    # no email — only action/tool/arg-key metadata + success). Best-effort:
+    # a feedback write must never break the card callback.
+    success = ("error" not in parsed) and (parsed.get("code") == 200)
+    err = parsed.get("error") or (None if success else parsed.get("message"))
+    try:
+        feedback.record_card_action(
+            open_id, action, tool_name, list(args.keys()), success, error=err)
+    except Exception:
+        log.exception("feedback.record_card_action failed (non-fatal)")
 
     if "error" in parsed:
         detail = parsed["error"].split(":", 1)[-1].strip()
