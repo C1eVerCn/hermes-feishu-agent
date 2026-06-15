@@ -408,6 +408,49 @@ class TestParseChineseTime:
         assert self._t("今天") is None  # day only, no time
         assert self._t("几点") is None
 
+    def test_bare_period_time_no_day_word(self):
+        """Day-less '晚上8点' / '下午5点' must resolve (to the `now` day) —
+        the docstring promised this but no regex implemented it.
+        Regression for the '从明天下午5点到晚上8点' report."""
+        dt = self._t("晚上8点")
+        assert dt is not None and dt.hour == 20 and dt.day == 12
+        dt2 = self._t("下午5点")
+        assert dt2 is not None and dt2.hour == 17 and dt2.day == 12
+        dt3 = self._t("8点")
+        assert dt3 is not None and dt3.hour == 8
+
+
+class TestReservationRangeDayInheritance:
+    """The end of a range without an explicit day inherits the start's day."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.handler = bot.handler
+
+    def _args(self, text, monkeypatch):
+        import json
+        from ocl.pipeline import OclResult
+        captured = {}
+        monkeypatch.setattr(self.handler.bench_handlers, "dry_run_reserve_bench",
+                            lambda a: (captured.__setitem__("args", a),
+                                       json.dumps({"dry_run": True, "summary": "x", "args": a}))[1])
+        monkeypatch.setattr(self.handler, "ocl_apply",
+                            lambda r, u, captured=None: OclResult(text=r, blocked=False, card={"ok": 1}))
+        monkeypatch.setattr(self.handler, "set_current_user", lambda *a: None)
+        monkeypatch.setattr(self.handler, "set_current_email", lambda *a: None)
+        out = self.handler._try_reserve_fast_path(text, "ou_x", "x@y.com")
+        assert out is not None
+        return captured["args"]
+
+    def test_end_inherits_start_day(self, monkeypatch):
+        """'从明天下午5点到晚上8点' → start and end on the SAME (tomorrow) day."""
+        a = self._args("预约CT001，从明天下午5点到晚上8点，任务是测试，目的是压测", monkeypatch)
+        assert "17:00:00" in a["startTime"]
+        assert "20:00:00" in a["endTime"]
+        # Same calendar day — end is not stuck on "today".
+        assert a["startTime"][:10] == a["endTime"][:10]
+
 
 class TestReservationFastPath:
     """End-to-end: text → extracted args → dry_run_reserve_bench → OCL card."""

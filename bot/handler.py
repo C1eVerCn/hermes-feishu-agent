@@ -541,7 +541,31 @@ def _parse_chinese_time(text: str, now: datetime) -> Optional[datetime]:
         except ValueError:
             return None
 
+    # Bare period + N点 (no day word) — e.g. "晚上8点" / "下午5点" / "8点".
+    # Resolves to the `now` calendar day. Callers parsing a RANGE re-anchor
+    # the end to the start's day (see _try_reserve_fast_path) so
+    # "从明天下午5点到晚上8点" means tomorrow 20:00, not today 20:00.
+    m = re.search(
+        r'(上午|下午|早上|晚上|中午|夜里|凌晨)?\s*(\d{1,2})\s*[点时:：]',
+        text,
+    )
+    if m:
+        period, hour_str = m.groups()
+        hour = int(hour_str)
+        if period == "下午" and hour < 12:
+            hour += 12
+        elif period in ("晚上", "夜里", "凌晨") and hour < 12 and hour != 0:
+            hour += 12
+        return now.replace(hour=hour, minute=0, second=0, microsecond=0)
+
     return None
+
+
+def _has_day_marker(text: str) -> bool:
+    """True if the expression names an explicit calendar day (今/明/后天 or
+    X月X号). Used to decide whether a range's end time must inherit the
+    start's day."""
+    return bool(re.search(r'(今|明|后)天?|\d{1,2}\s*月\s*\d{1,2}\s*号?', text))
 
 
 def _try_reserve_fast_path(text: str, user_id: str, email: str):
@@ -592,6 +616,14 @@ def _try_reserve_fast_path(text: str, user_id: str, email: str):
     now_cn = datetime.now() + timedelta(hours=8)
     start_dt = _parse_chinese_time(start_text, now_cn)
     end_dt = _parse_chinese_time(end_text, now_cn)
+    # A range end without an explicit day inherits the start's calendar day:
+    # "从明天下午5点到晚上8点" → end is tomorrow 20:00, not today 20:00.
+    if end_dt and start_dt and not _has_day_marker(end_text):
+        end_dt = end_dt.replace(year=start_dt.year, month=start_dt.month,
+                                day=start_dt.day)
+        if end_dt <= start_dt:
+            # Crosses midnight (e.g. 从晚上10点到凌晨2点) → next day.
+            end_dt = end_dt + timedelta(days=1)
     if not start_dt and not end_dt:
         return OclResult(
             text=("无法识别起止时间，请用具体时间表达。\n"
