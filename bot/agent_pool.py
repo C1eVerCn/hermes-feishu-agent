@@ -1,7 +1,9 @@
 import logging
+import os
 import threading
 from collections import OrderedDict
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from run_agent import AIAgent  # hermes-agent package
 
@@ -11,6 +13,44 @@ from config.settings import settings
 from ocl.session_map import register as session_register, evict as session_evict
 
 log = logging.getLogger(__name__)
+
+# DMZ 自进化记忆落盘根目录。hermes 只从 plugins/memory 或 $HERMES_HOME/plugins
+# 发现 provider，所以我们不走它的插件发现，而是构造 AIAgent 后直接挂载本 provider
+# （见 _wire_dmz_memory）。存储放在挂载进容器的项目 data/ 卷里，跨重启/重建持久化。
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DMZ_MEMORY_HOME = os.getenv("DMZ_MEMORY_HOME") or str(_PROJECT_ROOT / "data")
+
+
+def _wire_dmz_memory(agent, session_id: str, user_id: str) -> None:
+    """Attach the DMZ cross-session MemoryProvider to a freshly-built agent.
+
+    hermes wires memory providers from config (`memory.provider`) by scanning
+    `plugins/memory/` / `$HERMES_HOME/plugins/`. Our provider lives in-repo at
+    `bot/dmz_memory.py`, so instead of shipping a plugin shim into HERMES_HOME
+    (ephemeral, out of version control) we replicate hermes's wiring directly:
+    create a MemoryManager, register the provider, initialize it for this user.
+
+    The conversation loop then uses `agent._memory_manager` for prefetch (recall
+    before each turn, conversation_loop.py) and sync (write after each turn,
+    run_agent.py). Best-effort: any failure here must NOT break agent creation.
+    """
+    # Don't clobber a config-driven provider if one was already wired.
+    if getattr(agent, "_memory_manager", None) is not None:
+        return
+    if not user_id:
+        return  # anonymous → DMZ provider no-ops on write anyway
+    try:
+        from agent.memory_manager import MemoryManager
+        from bot.dmz_memory import DMZMemoryProvider
+        mm = MemoryManager()
+        provider = DMZMemoryProvider()
+        mm.add_provider(provider)
+        provider.initialize(session_id=session_id, user_id=user_id,
+                            hermes_home=_DMZ_MEMORY_HOME)
+        agent._memory_manager = mm
+        log.info("dmz_memory wired user=%s home=%s", user_id[:8], _DMZ_MEMORY_HOME)
+    except Exception:
+        log.exception("dmz_memory wiring failed (non-fatal) user=%s", user_id[:8])
 
 
 def _warmup_agent(agent) -> None:
@@ -139,7 +179,10 @@ class AgentPool:
                 ephemeral_system_prompt=_FEISHU_SYSTEM_PROMPT_BASE.replace("__NOW_CN__", _now_cn()),
                 enabled_toolsets=["bench", "vlm"],  # matches _TOOLSET in register.py
                 session_id=session_id,           # Phase 3.5: plugin ACL
+                user_id=user_id,                 # 自进化：per-user 记忆作用域
             )
+            # 自进化：挂载 DMZ 跨会话记忆 provider（per-user，落盘到 data/dmz_memory）。
+            _wire_dmz_memory(agent, session_id, user_id)
             self._pool[user_id] = agent
             self._pool.move_to_end(user_id)
             session_register(session_id, user_id)

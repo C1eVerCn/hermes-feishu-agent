@@ -87,26 +87,16 @@ OCL 按 min_role粗粒度门控工具；后端按 emailAddress细粒度校验（
 
 DMZ智能体已实现 hermes `MemoryProvider` 协议，把用户偏好、近期操作、错误模式跨会话持久化。
 
-**启用方式：**
+**已默认启用（无需配置）。** 接线方式见 `bot/agent_pool.py:_wire_dmz_memory`：
 
-1. 在项目根目录运行：
- ```bash
- export DMZ_PROJECT_ROOT=/Users/chris/IM/hermes-feishu-agent
- ```
+- hermes 只从 `plugins/memory/` 或 `$HERMES_HOME/plugins/` 发现 provider（靠 `memory.provider` 配置键激活）。我们的 provider 在 repo 内 `bot/dmz_memory.py`，**不走** hermes 的插件发现，而是在 `agent_pool.get_or_create()` 构造完 `AIAgent` 后**直接挂载**：建 `MemoryManager` → `add_provider(DMZMemoryProvider())` → `initialize(session_id, user_id, hermes_home)`。
+- **关键前提**：`AIAgent` 构造时必须传 `user_id=user_id`（否则 hermes 不把 user 身份透传给 provider，`sync_turn` 会因 `user_id` 为空而空转，记忆永不落盘）。
+- hermes 运行时自动调用：`conversation_loop` 每轮调 `prefetch_all`（召回），`run_agent` 每轮结束调 `sync_all`→`sync_turn`（写回）。
+- 记住：常查的台架架构（如 "1.0架构"）、VLM场景名、最近 20 步工具调用模式（仅工具名+参数 key）、累计 4xx/5xx 错误模式（prefetch 时提示「曾频繁遇到…注意规避」）。
 
-2. 把 hermes 配置改成 DMZ 记忆：
- ```yaml
- # ~/.hermes/config.yaml
- memory:
- provider: dmz
- ```
+**存储位置：** `$DMZ_MEMORY_HOME/dmz_memory/<user_hash16>/memory.json`，默认 `data/dmz_memory/…`（落在挂载进容器的项目卷里，跨重启/重建持久化；已 gitignore）。可用环境变量 `DMZ_MEMORY_HOME` 覆盖。
 
-3. 启动后，agent 会自动从 `bot/dmz_memory.py` 加载 `DMZMemoryProvider`：
- - 跨会话记住用户常查的台架架构（如 "1.0架构"）、VLM场景名（如 "hotupdate_filter_..."）
- - 记住最近 20 步工具调用模式（仅工具名+参数 key，不存参数值）
- - 累计 4xx/5xx 错误模式，prefetch 时给 LLM 提示「用户曾频繁遇到...注意规避」
-
-**存储位置：** `~/.hermes/dmz_memory/<user_hash16>/memory.json`
+**验证已生效：** 启动日志出现 `dmz_memory wired user=…` + `dmz_memory_init`；发几条消息后 `data/dmz_memory/<hash>/memory.json` 会出现并累积。
 
 **安全铁律（不可变）：**
 
