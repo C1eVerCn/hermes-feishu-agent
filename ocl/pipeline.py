@@ -6,7 +6,7 @@ Fail-open on unexpected exceptions (log + pass through).
 import logging
 from dataclasses import dataclass, field
 
-from ocl import format_control, content_filter, length_limiter, card_builder
+from ocl import format_control, content_filter, length_limiter, card_builder, intent_filter
 from config.settings import settings
 
 log = logging.getLogger(__name__)
@@ -42,6 +42,17 @@ def apply(response: str, user_id: str, captured: list[dict] | None = None) -> Oc
         if content.blocked:
             block_msg = getattr(settings, "OCL_CONTENT_BLOCK_MESSAGE", _BLOCK_MESSAGE)
             return OclResult(text=block_msg, blocked=True, block_reason=content.reason, card=None)
+
+        # 2.5 Intent guard — 拒绝与台架/VLM 无关的 LLM 闲聊回复
+        # （用户要求：连 1+1 / 天气都不要答，统一引导到正常业务流程）
+        intent = intent_filter.check(text)
+        if intent.redirected:
+            return OclResult(
+                text=intent_filter.REDIRECT_MESSAGE,
+                blocked=False,
+                block_reason="off_topic_chitchat",
+                card=None,  # 让引导话术用 text-as-card 渲染，保留视觉一致
+            )
 
         # 3. Length limit
         text = length_limiter.apply(text)
