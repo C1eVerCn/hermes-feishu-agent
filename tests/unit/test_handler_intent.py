@@ -804,3 +804,48 @@ class TestBenchExtraction:
         m = self.handler._RESERVE_BENCH_RE.search("预约TJ052503")
         assert m is not None
         assert m.group(1) == "TJ052503"
+
+
+class TestReserveFieldExtraction:
+    """Regression: 「任务名称是X」must extract X, not '名称是X'."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.h = bot.handler
+
+    def test_task_name_prefix_variants(self):
+        cases = {
+            "任务名称是感知压测，目的是测试": ("感知压测", "测试"),
+            "任务是标定，目的是压测": ("标定", "压测"),
+            "任务名是A目的是B": ("A", "B"),
+        }
+        for text, (want_task, want_purpose) in cases.items():
+            tm = self.h._RESERVE_TASK_RE.search(text)
+            pm = self.h._RESERVE_PURPOSE_RE.search(text)
+            assert tm and tm.group(1) == want_task, (text, tm and tm.group(1))
+            assert pm and pm.group(1) == want_purpose, (text, pm and pm.group(1))
+
+
+class TestQueryFastPathRouting:
+    """Regression: 「查询我的预约记录 / 审批记录」must hit the deterministic
+    fast path (not the LLM, which emits unrenderable markdown tables)."""
+
+    def setup_method(self):
+        import importlib, bot.handler
+        importlib.reload(bot.handler)
+        self.h = bot.handler
+
+    def _route(self, text):
+        for pat, tool, _fn in self.h._FAST_PATH_PATTERNS:
+            if pat.match(text.strip()):
+                return tool
+        return None
+
+    def test_reservation_query_variants(self):
+        for t in ("查询我的预约记录", "查我的预约", "我的预约", "帮我查我的预约记录"):
+            assert self._route(t) == "list_my_reservations", t
+
+    def test_approval_query_variants(self):
+        for t in ("查询我的审批记录", "查看我的审批记录", "待审批", "我的待审批列表"):
+            assert self._route(t) == "list_my_approvals", t

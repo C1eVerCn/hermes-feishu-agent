@@ -260,27 +260,29 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         return
 
     # ──身份闸（最早期）：先 resolve role，让所有路径看到一致的角色 ─
-    # 简化模型：「飞书能拿到 email → 默认 role=1」；admin 显式覆盖永远胜出
-    # （auto_register 幂等不会改已有 admin 设置；set_role 只在 role==0 时升级）。
+    # 权限模型（2026-06-16）：能给机器人发消息 ⇒ 必在飞书后台「可见范围」内
+    # ⇒ 默认 role=1。不再以「Contact API 是否返回 email」为门槛——隐私设置 /
+    # app scope 取不到 email 的同事过去被卡在 role=0、被拒之门外，这正是反馈
+    # 的根因。email 仅用于展示 + 台架预约域服务端注入，取不到不影响进入 agent。
+    # admin 显式设置的 role 2/3 永远胜出（auto_register 幂等；只在 role==0 升级）。
     admin = get_identity_admin()
     email = identity.email_of(user_id)
     name = identity.name_of(user_id)
-    if email:
+    if user_id:
         admin.auto_register(user_id, email=email, name=name)
-        # BUGFIX (#8): if the user already has a record but Feishu now
-        # returns a DIFFERENT email (user changed their primary email
-        # in Feishu), refresh the stored email/name. Without this, the
-        # bench API would receive the stale email and silently misroute
-        # the reservation under the wrong account.
-        existing = admin.get(user_id) or {}
-        if existing.get("email") and existing["email"] != email:
-            admin.update_profile(user_id, email=email, name=name or existing.get("name", ""),
-                                 operator="auto_email_refresh")
+        # 飞书这次返回了 email（首次解析到，或用户改了主邮箱）→ 回填 / 刷新，
+        # 否则台架 API 会拿到空 / 旧 email，把预约静默误路由到错误账户。
+        if email:
+            existing = admin.get(user_id) or {}
+            if existing.get("email") != email:
+                admin.update_profile(user_id, email=email, name=name or existing.get("name", ""),
+                                     operator="auto_email_sync")
+        # 可见范围内默认 role=1（含 email 解析失败者）。已有 2/3 不下调。
         if admin.get_role(user_id) == 0:
             admin.set_role(
                 user_id, 1,
-                operator="auto_email_verified",
-                note=f"feishu returned email {email}",
+                operator="auto_in_scope",
+                note=f"in-visible-scope default; email={'yes' if email else 'none'}",
             )
     role = admin.get_role(user_id)
     # Env-configured admins (OCL_ADMIN_USER_IDS) are role 3 everywhere, not just
@@ -291,6 +293,16 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     if admin.get(user_id):
         email = admin.get(user_id).get("email", "") or email
         name = admin.get(user_id).get("name", "") or name
+
+    # ──台架平台自动开通（best-effort，异步） ────────────────────
+    # 飞书侧已把可见范围内用户默认升到 role=1，但台架预约后端（@9013）独立按
+    # emailAddress 鉴权：employee 表里查不到 email 立即返回「不是平台用户」。
+    # 这里在确定 email 后异步调 /fmp/employee/insertEmployee 补齐，失败也不
+    # 阻断消息（不变量：WS 回调立即返回）。admin 已在台架平台预存在，会被
+    # provision_now 识别为「已被注册」直接缓存命中，不再调后端。
+    if email:
+        from bench_tools import provision
+        provision.ensure_bench_user(email, name)
 
     # ── Layer 0: Simple intent — instant reply, no agent ──────────────────
     instant = _match_simple_intent(text)
@@ -343,13 +355,11 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         sender.send_text_as_card(chat_id, admin_response)
         return
 
-    # ── 身份闸：role=0 才拒绝进入 agent（resolve 已在 _handle 入口完成） ─
+    # ── 身份闸：正常用户已在入口默认提升到 role=1；只有连 open_id 都拿不到
+    #    （匿名 / 异常事件）才会 role==0，此时无法注入身份，安全起见拒绝。 ─
     if role == 0:
         sender.send_text_as_card(chat_id,
-            f"您还不是平台用户（您的 open_id: {user_id}）。\n"
-            "可能原因：飞书 Contact API 未返回您的邮箱（隐私设置或 app 权限不足）。\n"
-            "请联系管理员手动开通，或在飞书开发者后台确认机器人有「获取用户邮箱」权限。"
-        )
+            "无法识别您的身份（未获取到 open_id），请在飞书私聊中直接发消息后重试。")
         return
 
     # ── Dry-run confirm/cancel interceptor (per 车辆预约 reference flow) ─

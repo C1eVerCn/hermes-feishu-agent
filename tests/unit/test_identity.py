@@ -98,3 +98,19 @@ def test_email_of_empty_open_id():
 
 def test_role_of_empty_open_id():
     assert identity.role_of("") == 0
+
+
+def test_role_picks_up_external_write_via_mtime(tmp_path, monkeypatch):
+    """ocl.identity must reflect writes made by bot.identity_admin to the same
+    file (regression: cache loaded once → newly-registered colleague stayed
+    role 0 → tool calls wrongly blocked)."""
+    import os, time as _t
+    f = tmp_path / "identity_map.json"
+    f.write_text(json.dumps({"ou_admin": 3}))
+    monkeypatch.setattr(identity, "_MAP_FILE", str(f))
+    identity._invalidate_role_overrides()
+    assert identity.role_of("ou_colleague") == 0          # not yet present
+    # external writer (e.g. identity_admin) adds the colleague as role 1
+    f.write_text(json.dumps({"ou_admin": 3, "ou_colleague": {"email": "c@x.com", "role": 1}}))
+    os.utime(f, (_t.time() + 1, _t.time() + 1))           # bump mtime
+    assert identity.role_of("ou_colleague") == 1          # reload picks it up

@@ -33,6 +33,7 @@ _email_to_oid_cache: dict[str, str] = {}
 # ── role overrides from identity_map.json ─────────────────────────────────
 _role_overrides: dict[str, int] = {}
 _role_overrides_loaded: bool = False
+_role_overrides_mtime: float | None = None
 
 # ── lazily-initialised Feishu client ──────────────────────────────────────
 _client: lark.Client | None = None
@@ -55,9 +56,21 @@ def _get_client() -> lark.Client:
 
 
 def _load_role_overrides() -> dict[str, int]:
-    global _role_overrides_loaded
-    if _role_overrides_loaded:
+    """Load open_id→role from identity_map.json, reloading when the file
+    changes on disk. bot.identity_admin writes new users to the SAME file, so
+    without mtime-based invalidation a freshly-registered colleague stays at
+    role 0 in this cache → their tool calls get wrongly blocked (the cache was
+    loaded once at startup and never refreshed)."""
+    global _role_overrides_loaded, _role_overrides_mtime
+    try:
+        mtime = os.path.getmtime(_MAP_FILE)
+    except OSError:
+        mtime = None
+    if _role_overrides_loaded and mtime == _role_overrides_mtime:
         return _role_overrides
+    # (re)load — clear first so deletions on disk are reflected
+    _role_overrides.clear()
+    _email_to_oid_cache.clear()
     try:
         with open(_MAP_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -76,15 +89,17 @@ def _load_role_overrides() -> dict[str, int]:
                     _role_overrides[k] = v
     except Exception:
         pass
+    _role_overrides_mtime = mtime
     _role_overrides_loaded = True
     return _role_overrides
 
 
 def _invalidate_role_overrides() -> None:
-    global _role_overrides_loaded
+    global _role_overrides_loaded, _role_overrides_mtime
     _role_overrides.clear()
     _email_to_oid_cache.clear()
     _role_overrides_loaded = False
+    _role_overrides_mtime = None
 
 
 def _resolve_open_id(open_id: str) -> tuple[str, str]:

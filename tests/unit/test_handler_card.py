@@ -61,33 +61,38 @@ def test_handle_dispatches_card_for_structured_result(monkeypatch, tmp_path):
     assert actions
 
 
-def test_handle_non_platform_user_gets_card(monkeypatch):
-    """User-facing requirement 2026-06-10: every reply renders as a card,
-    including the role=0 non-platform-user reject path."""
+def test_handle_in_scope_user_without_email_is_platform_user(monkeypatch, tmp_path):
+    """权限模型（2026-06-16）：能给机器人发消息 = 在飞书可见范围内 = 默认 role=1，
+    即便 Contact API 取不到邮箱也不再拒之门外（线上反馈根因）。"""
     import importlib
     import bot.handler as handler
+    import bot.identity_admin as ia_mod
+    importlib.reload(ia_mod)
     importlib.reload(handler)
+    from bot.identity_admin import IdentityAdmin
+    test_admin = IdentityAdmin(str(tmp_path / "im.json"), str(tmp_path / "audit.jsonl"))
+    monkeypatch.setattr(ia_mod, "get_admin", lambda: test_admin)
+    monkeypatch.setattr(handler, "get_identity_admin", lambda: test_admin)
 
     sent = {}
     monkeypatch.setattr(handler.sender, "send_card", lambda chat, card: sent.update(card=card))
     monkeypatch.setattr(handler.sender, "send_text_as_card",
                         lambda chat, text: sent.update(card={"_text": text}))
-    monkeypatch.setattr(handler.identity, "email_of", lambda uid: "")  # not a platform user
+    monkeypatch.setattr(handler.identity, "email_of", lambda uid: "")   # Contact API 无邮箱
+    monkeypatch.setattr(handler.identity, "name_of", lambda uid: "")
 
-    handler._handle(_make_event("帮我看我的预约", "ou_ghost", "oc_chat"))
-    assert "card" in sent
-    # Either send_card with a wrapped card OR send_text_as_card (which we
-    # mock as a card with _text). Either way the response should reference
-    # "平台用户" and contain the user's open_id.
-    rendered = sent["card"]
-    if "_text" in rendered:
-        assert "平台用户" in rendered["_text"]
-        assert "ou_ghost" in rendered["_text"]
-    else:
-        elements = rendered.get("elements", [])
-        joined = "\n".join(
-            e.get("text", {}).get("content", "") for e in elements
-            if e.get("tag") == "div"
-        )
-        assert "平台用户" in joined
-        assert "ou_ghost" in joined
+    called = {}
+    fake_agent = types.SimpleNamespace(
+        chat=lambda text, stream_callback=None: called.setdefault("text", text) or "好的")
+    monkeypatch.setattr(handler.agent_pool, "get_or_create", lambda uid: fake_agent)
+    monkeypatch.setattr(handler.tool_capture, "read", lambda sid: [])
+
+    # 自由文本（不命中简单意图 / 快路径）→ 必然走到 agent
+    handler._handle(_make_event("随便和你聊聊", "ou_noemail", "oc_chat"))
+
+    # 无邮箱也被提升为 role=1，并真的进入了 agent（没有被身份闸拦下）
+    assert test_admin.get_role("ou_noemail") == 1
+    assert "text" in called
+    rendered = sent.get("card", {})
+    text = rendered.get("_text", "") if isinstance(rendered, dict) else ""
+    assert "平台用户" not in text and "无法识别" not in text
