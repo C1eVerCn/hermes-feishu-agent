@@ -25,7 +25,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["feishu", "bot", "infra", "config", "mock_tools", "ocl", "hermes_plugins"]
+packages = ["feishu", "bot", "infra", "config", "ocl", "hermes_plugins", "bench_tools", "vlm_tools"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

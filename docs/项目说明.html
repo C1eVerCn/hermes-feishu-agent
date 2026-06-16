@@ -158,7 +158,7 @@ feishu/sender.py           互动卡片（或纯文本兜底）→ 飞书
   <table>
     <thead><tr><th>目录</th><th>职责</th><th>关键文件</th></tr></thead>
     <tbody>
-      <tr><td><code>feishu/</code></td><td>只做 WebSocket 收发 / 限流 / 通知；零业务逻辑</td><td>ws_client, sender, typing_indicator, notify</td></tr>
+      <tr><td><code>feishu/</code></td><td>只做 WebSocket 收发 / 限流 / 通知；零业务逻辑</td><td>ws_client, sender, notify</td></tr>
       <tr><td><code>bot/</code></td><td>hermes-agent 桥接：意图分层、Agent 池、卡片回调、身份管理、自进化</td><td>handler, agent_pool, card_action_handler, identity_admin, dmz_memory, feedback, curator_runner, dry_run_state, reservation_store</td></tr>
       <tr><td><code>ocl/</code></td><td>Output Control Layer：格式/内容/长度、角色 ACL、身份解析、卡片构建</td><td>pipeline, format_control, content_filter, length_limiter, permission, identity, session_map, tool_guard, tool_capture, card_builder, markdown_to_lark</td></tr>
       <tr><td><code>bench_tools/</code></td><td>台架预约工具；handler 用 <code>guarded()</code> 包裹；emailAddress 服务端注入</td><td>register, handlers, jwt_auth</td></tr>
