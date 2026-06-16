@@ -51,14 +51,21 @@ def send_text_as_card(chat_id: str, text: str) -> None:
     send_card(chat_id, card)
 
 
-def send_to_user(open_id: str, text: str) -> None:
-    """按 open_id 给用户发私信。"""
+def send_to_user(open_id: str, text: str) -> bool:
+    """按 open_id 给用户发私信。返回 True 仅当所有分块都发送成功。
+
+    BUGFIX: 过去返回 None，调用方 notify._notify_dispatchers_sync 用
+    `if send_to_user(...)` 统计成功数 → 永远为假 → 即使送达也报「调度员通知失败」。
+    """
+    ok = True
     chunks = _chunk_text(text)
     for i, chunk in enumerate(chunks):
         prefix = f"[{i + 1}/{len(chunks)}]\n" if len(chunks) > 1 else ""
-        _send_one_to_user(open_id, prefix + chunk)
+        if not _send_one_to_user(open_id, prefix + chunk):
+            ok = False
         if i < len(chunks) - 1:
             time.sleep(RATE_LIMIT_INTERVAL)
+    return ok
 
 
 def send_card(chat_id: str, card: dict, max_retries: int = 3) -> None:
@@ -130,7 +137,7 @@ def _send_one(chat_id: str, text: str, max_retries: int = 3) -> None:
     log.error("Feishu send failed after %d retries for chat_id=%s", max_retries, chat_id)
 
 
-def _send_one_to_user(open_id: str, text: str, max_retries: int = 3) -> None:
+def _send_one_to_user(open_id: str, text: str, max_retries: int = 3) -> bool:
     global _last_send_time
 
     with _send_lock:
@@ -153,7 +160,7 @@ def _send_one_to_user(open_id: str, text: str, max_retries: int = 3) -> None:
         resp = _client.im.v1.message.create(req)
         if resp.success():
             metrics.inc("messages_sent")
-            return
+            return True
 
         if resp.code == 429:
             wait = 2 ** attempt
@@ -162,9 +169,10 @@ def _send_one_to_user(open_id: str, text: str, max_retries: int = 3) -> None:
             continue
 
         log.error("Feishu send_to_user failed: code=%s msg=%s", resp.code, resp.msg)
-        return
+        return False
 
     log.error("Feishu send_to_user failed after %d retries for open_id=%s", max_retries, open_id)
+    return False
 
 
 def _chunk_text(text: str) -> list[str]:

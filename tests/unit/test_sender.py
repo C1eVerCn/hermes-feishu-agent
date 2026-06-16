@@ -55,3 +55,22 @@ def test_send_card_builds_interactive_payload():
     body = captured["req"].request_body
     assert body.msg_type == "interactive"
     assert json.loads(body.content)["elements"][0]["tag"] == "div"
+
+
+def test_send_to_user_returns_true_on_success():
+    """send_to_user must return a truthy success signal — notify.py counts
+    successes via `if send_to_user(...)`; returning None made every delivered
+    DM count as a failure ('调度员通知发送失败')."""
+    from unittest.mock import patch, MagicMock
+    import feishu.sender as sender
+    ok_resp = MagicMock(); ok_resp.success.return_value = True
+    with patch.object(sender._client.im.v1.message, "create", return_value=ok_resp):
+        assert sender.send_to_user("ou_x", "hi") is True
+
+
+def test_send_to_user_returns_false_on_failure():
+    from unittest.mock import patch, MagicMock
+    import feishu.sender as sender
+    bad = MagicMock(); bad.success.return_value = False; bad.code = 99991400; bad.msg = "x"
+    with patch.object(sender._client.im.v1.message, "create", return_value=bad):
+        assert sender.send_to_user("ou_x", "hi") is False

@@ -1,14 +1,12 @@
-"""Per-user pending dry_run_reserve_bench state.
+"""每个用户挂起dry_run_reserve_bench状态。
 
-When the LLM calls `dry_run_reserve_bench`, the user is shown a confirm
-card. While the user is deliberating, the bench args (benchNo,
-startTime, endTime, taskName, testPurpose) live in this in-memory store
-keyed by user_id. When the user replies with "确认", the handler looks
-up the state, calls the real reserve_bench, and clears the entry.
+当LLM调用“dry_run_reserve_bench”时，用户会看到一个确认消息
+卡片。当用户正在考虑时，
+startTime、endTime、taskName、testPurpose）存储在内存中
+由user_id键控。当用户回复“确认”时，处理程序会查看
+在州内，调用真正的reserve_bench，并清除条目。
 
-The entry expires after a few minutes so a forgotten confirm doesn't
-hang around forever and cause an accidental reservation on a later
-intent.
+条目将在几分钟后过期，因此被遗忘的确认不会永远逗留，并在以后意外预订意图。
 """
 import logging
 import threading

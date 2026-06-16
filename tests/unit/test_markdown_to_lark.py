@@ -24,3 +24,11 @@ def test_code_fence_stripped():
 def test_multiple_blank_lines_collapsed():
     out = to_lark_md("a\n\n\n\nb")
     assert "\n\n\n" not in out
+
+
+def test_markdown_table_flattened():
+    # 飞书 lark_md 不渲染表格 → 必须摊平成可读行，不留字面竖线
+    out = to_lark_md("| 台架 | 任务 |\n|------|------|\n| TJ001 | 测试 |\n| TJ002 | 压测 |")
+    assert "|------|" not in out
+    assert "台架：TJ001" in out and "任务：测试" in out
+    assert "台架：TJ002" in out and "任务：压测" in out

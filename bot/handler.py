@@ -577,11 +577,13 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
      'list_architectures', lambda m: {}),
 
     # ── list_my_reservations ──
-    (re.compile(r'^(我的|看看我的|查看我的|看下我的)\s*(预约|记录|预约记录|所有预约)[\s!！。.]*$'),
+    # 覆盖「我的预约」「查询我的预约记录」「查我的预约」等说法，走确定性卡片，
+    # 避免落到 LLM 输出 Markdown 表格（飞书 lark_md 不渲染表格 → 字面竖线）。
+    (re.compile(r'^(查询|查看|查一下|查询一下|查|看看|看下|看一下|看|帮我查|帮我看)?\s*我的\s*(预约记录|预约|记录|所有预约)[\s!！。.]*$'),
      'list_my_reservations', lambda m: {}),
 
     # ── list_my_approvals ──
-    (re.compile(r'^(我的|看看我的|查看我的)?\s*(待审批|待我审批|审批列表|待审批列表)[\s!！。.]*$'),
+    (re.compile(r'^(查询|查看|查一下|查询一下|查|看看|看下|看一下|看|帮我查|帮我看)?\s*(我的)?\s*(待审批列表|待审批|待我审批|审批列表|审批记录|审批)[\s!！。.]*$'),
      'list_my_approvals', lambda m: {}),
 ]
 
@@ -596,8 +598,12 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
 # (commas and the 任务是/目的是 prefixes are flexible).
 
 _RESERVE_BENCH_RE = re.compile(r'([A-Z]{2,3}\d+)')
-_RESERVE_TASK_RE = re.compile(r'任务[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|目的|$))')
-_RESERVE_PURPOSE_RE = re.compile(r'目的[是为的话]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|$))')
+# 「任务名称是X」「任务名是X」「任务叫X」「任务是X」「任务X」都要抽出 X，
+# 不能把「名称是」当成任务内容（线上 bug：任务=「名称是感知压测」）。
+_RESERVE_TASK_RE = re.compile(
+    r'任务\s*(?:名称|名字|名)?\s*[是为叫:：]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|目的|用途|$))')
+_RESERVE_PURPOSE_RE = re.compile(
+    r'(?:测试目的|目的|用途)\s*(?:名称|名字|名)?\s*[是为叫:：]?\s*([^，,。;；\n]+?)(?=(?:[，,。;；\n]|任务|$))')
 
 
 _CN_DIGITS = {'零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4,

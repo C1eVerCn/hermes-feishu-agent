@@ -53,7 +53,7 @@ def test_handle_dispatches_card_for_structured_result(monkeypatch, tmp_path):
              "taskName": "t", "status": 0, "statusDesc": "待审批"}]}}
     ])
 
-    handler._handle(_make_event("帮我看我的预约", "ou_x", "oc_chat"))
+    handler._handle(_make_event("看看我最近有什么预约需要处理", "ou_x", "oc_chat"))
     assert "card" in sent
     assert sent["chat"] == "oc_chat"
     # the card carries the pending reservation's cancel button
