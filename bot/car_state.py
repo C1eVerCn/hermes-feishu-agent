@@ -36,7 +36,7 @@ class CarPendingState:
     vehicle_no: str = ""
     vehicle_type: str = ""
     chip: str = ""                      # v2 新增 — 芯片平台（Xavier/ADCU/Orin/Thor）
-    platform: str = ""                  # 旧字段保留（兼容旧 handler 路径）
+    platform: str = ""                  # TODO(Task 6): 旧字段，PR6 删 fast-path 时一并清除
     license_plate: str = ""
     start_time: str = ""
     end_time: str = ""
