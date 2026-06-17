@@ -1,6 +1,6 @@
 """车辆预约对话流 FSM（spec §3.2 / §3.3）。
 
-13 状态机：
+14 状态机：
   START → DIRECT_BY_ID / SELECT_VEHICLE_TYPE → CONFIRM_CHIP → VEHICLE_ENTRY
   → SELECT_DURATION / SELECT_FROM_LIST → DURATION_CONFIRM ★ → SELECT_TIME
   → INPUT_TASK → INPUT_LOCATION → CONFIRM → COMMIT → SUCCESS
@@ -10,14 +10,11 @@ DIRECT_BY_ID / SELECT_FROM_LIST / INPUT_TASK / INPUT_LOCATION 收自由文本时
 所有按钮渲染、时段匹配、查车、提交都是硬编码 MCP 调用，不经 LLM。
 """
 import logging
-from typing import Optional
-
-from ocl.tool_guard import get_current_caller
 
 log = logging.getLogger(__name__)
 
 
-# ── 13 状态常量（spec §3.2） ────────────────────────────────────────────────
+# ── 14 状态常量（spec §3.2） ────────────────────────────────────────────────
 STATE_START = "START"
 STATE_DIRECT_BY_ID = "DIRECT_BY_ID"
 STATE_SELECT_VEHICLE_TYPE = "SELECT_VEHICLE_TYPE"
@@ -33,13 +30,13 @@ STATE_CONFIRM = "CONFIRM"
 STATE_COMMIT = "COMMIT"
 STATE_SUCCESS = "SUCCESS"
 
-ALL_STATES = {
+ALL_STATES = frozenset({
     STATE_START, STATE_DIRECT_BY_ID, STATE_SELECT_VEHICLE_TYPE,
     STATE_CONFIRM_CHIP, STATE_VEHICLE_ENTRY, STATE_SELECT_DURATION,
     STATE_SELECT_FROM_LIST, STATE_DURATION_CONFIRM, STATE_SELECT_TIME,
     STATE_INPUT_TASK, STATE_INPUT_LOCATION, STATE_CONFIRM,
     STATE_COMMIT, STATE_SUCCESS,
-}
+})
 
 
 class CarBookingFSM:
@@ -58,6 +55,10 @@ def advance(user_id: str, text: str = "") -> tuple[str, dict]:
     from bot import car_state
     pending = car_state.get(user_id)
     current_state = pending.state if pending else STATE_START
+    # 校验：car_state 里持久化出来的 state 必须是已知状态名（防 typo）
+    if current_state not in ALL_STATES and current_state != "":
+        log.warning("fsm_advance unknown state user=%s state=%r", user_id, current_state)
+        current_state = STATE_START
     log.info("fsm_advance user=%s state=%s text=%r", user_id, current_state, text[:40])
     # 占位：Task 3-5 实现具体状态 handler
     raise NotImplementedError(f"FSM state handler not implemented: {current_state}")
