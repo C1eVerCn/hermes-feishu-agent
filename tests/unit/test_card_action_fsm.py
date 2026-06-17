@@ -13,14 +13,14 @@ def setup():
 
 
 def test_fsm_select_button_translates_value_to_text():
-    """fsm_select 按钮：value='DM2' → advance('DM2') → SELECT_VEHICLE_TYPE 处理。"""
+    """fsm_select 按钮：value='DM2' → advance('DM2') → SELECT_VEHICLE_TYPE 处理。
+    所有车型统一过 CONFIRM_CHIP（即使单芯片车型也确认一次）。"""
     car_state.save("ou_act", state="SELECT_VEHICLE_TYPE")
     toast, card = card_action_handler.handle("ou_act", {"action": "fsm_select", "value": "DM2"})
     pending = car_state.get("ou_act")
-    # DM2 是单芯片 → 应进 VEHICLE_ENTRY
-    assert pending.state == "VEHICLE_ENTRY"
+    assert pending.state == "CONFIRM_CHIP"
     assert pending.vehicle_type == "DM2"
-    assert pending.chip == "Xavier"
+    assert pending.chip == ""  # chip 还没选
     car_state.clear("ou_act")
 
 

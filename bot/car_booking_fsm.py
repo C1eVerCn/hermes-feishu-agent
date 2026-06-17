@@ -246,18 +246,12 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                 "text": "请直接输入车辆编号（如 SNV018）：",
             }
         if text in VEHICLE_TYPE_BUTTONS:
-            chip = _single_chip(text)
-            car_state.save(user_id, vehicle_type=text, chip=chip or "")
-            if chip:
-                return STATE_VEHICLE_ENTRY, {
-                    "text": f"已选车型 {text}（{chip} 芯片）。请选择查车方式：",
-                    "buttons": [{"text": t, "value": {"action": "fsm_entry", "value": t}}
-                               for t in ENTRY_MODE_BUTTONS]
-                }
+            car_state.save(user_id, vehicle_type=text)
+            # 统一过 CONFIRM_CHIP（即使单芯片车型也确认一次，避免"自动带上芯片"的歧义）
             return STATE_CONFIRM_CHIP, {
-                "text": f"已选车型 {text}。该车型支持多个芯片，请选择：",
+                "text": f"已选车型 {text}。请选择芯片平台：",
                 "buttons": [{"text": t, "value": {"action": "fsm_select_chip", "value": t}}
-                           for t in CHIP_BUTTONS]
+                            for t in CHIP_BUTTONS]
             }
         return STATE_SELECT_VEHICLE_TYPE, {
             "text": f"未识别车型「{text}」。请从按钮选择：",
