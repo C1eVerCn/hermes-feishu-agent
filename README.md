@@ -1,4 +1,4 @@
-# hermes-feishu-agent（DMZ 智能体）
+# hermes-feishu-agent（约车助手）
 
 基于 [hermes-agent](https://github.com/NousResearch/hermes-agent) + Minimax 的飞书机器人，通过 WebSocket 接收消息，在真实通道上探索**受控 LLM 输出**（权限、内容、格式、能力边界）。
 

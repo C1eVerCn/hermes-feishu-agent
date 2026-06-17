@@ -57,7 +57,7 @@ _MAX_INPUT_CHARS = 8000
 
 _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
     (re.compile(r'^(你好|hi|hello|hey|嗨|哈[啰咯]|早上好|下午好|晚上好|good\s*morning|good\s*afternoon|good\s*evening)[\s!！。.]*$', re.IGNORECASE),
-     "你好！我是 DMZ 智能体助手，专注于车辆预约管理（查询 / 预约 / 取消 / 归还 / 审批）。\n输入「帮助」了解我能做什么。"),
+     "你好！我是约车助手，专注于车辆预约管理（查询 / 预约 / 取消 / 归还 / 审批）。\n输入「帮助」了解我能做什么。"),
     (re.compile(r'^(谢谢|感谢|thanks|thank\s*you|3q|多谢|谢了|辛苦)[\s!！。.]*$', re.IGNORECASE),
      "不客气！有需要随时找我。"),
     (re.compile(r'^(再见|bye|拜拜|88|回见|下次聊)[\s!！。.]*$', re.IGNORECASE),
@@ -65,7 +65,7 @@ _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
     (re.compile(r'^(在吗|在不在|在线吗)[\s!！。.?？]*$'),
      "在的！有什么可以帮您的？"),
     (re.compile(r'^(你是谁|你叫什么|你是做什么的|你能做什么|介绍一下你自己)[\s!！。.?？]*$'),
-     "我是车辆预约助手，可以帮您：\n• 查询可用车辆\n• 预约 / 取消 / 归还车辆\n• 查询我的预约\n• （调度员/管理员）审批预约、查询待审批\n\n输入「我的权限」查看当前角色。"),
+     "我是约车助手，可以帮您：\n• 查询可用车辆\n• 预约 / 取消 / 归还车辆\n• 查询我的预约\n• （调度员/管理员）审批预约、查询待审批\n\n输入「我的权限」查看当前角色。"),
     (re.compile(r'^(帮助|help|怎么用|怎么操作|使用说明|功能)[\s!！。.?？]*$', re.IGNORECASE),
      "📋 我能帮你做的事情：\n\n🔍 查询类\n• 查询可用车辆（指定时间 + 平台 + 类型）\n• 查询我的预约\n• （调度员）查询待审批列表\n\n✏️ 操作类\n• 预约车辆（两步流程：选车 → 确认）\n• 取消待审批的预约\n• 归还已批准的车辆\n\n🛡️ 调度员/管理员\n• 审批预约\n\n💡 输入「我的权限」查看当前角色"),
     (re.compile(r'^(好[的]?|ok|嗯|哦|知道了|明白了|懂了|收到|了解|got\s*it)[\s!！。.]*$', re.IGNORECASE),
@@ -225,6 +225,12 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         sender.send_text_as_card(chat_id, _INPUT_TOO_LONG_REPLY)
         return
 
+    # ── Layer 0: Simple intent（先于身份闸，避免问候语被 18s 飞书 API 阻塞） ──
+    instant = _match_simple_intent(text)
+    if instant:
+        sender.send_text_as_card(chat_id, instant)
+        return
+
     # ── 身份闸 ─────────────────────────────────────────────────────────
     admin = get_identity_admin()
     email = identity.email_of(user_id)
@@ -248,12 +254,6 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     # ── 注入 CallerIdentity 到 contextvars（agent 路径和工具路径共用） ───
     caller = CallerIdentity(openid=user_id, email=email, mobile=None)
     set_current_caller(caller)
-
-    # ── Layer 0: Simple intent ─────────────────────────────────────────
-    instant = _match_simple_intent(text)
-    if instant:
-        sender.send_text_as_card(chat_id, instant)
-        return
 
     # ── 状态机：escape 关键词（用户在挂起状态时说「算了/换个」→ clear） ─
     if car_state.get(user_id) is not None:

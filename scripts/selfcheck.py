@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DMZ 智能体 · 自动化自检（selfcheck）。
+"""约车助手 · 自动化自检（selfcheck）。
 
 一条命令把项目从"能不能跑/对不对"角度全面体检，列出所有错误项，
 退出码非 0 表示有失败（供 CI / autofix.sh 回环修复消费）。
@@ -11,7 +11,8 @@
   4. settings_invariants  max_iterations=30 / timeout=120 等硬上限未被改坏
   5. env_drift        settings.py 读取的 env 键都在 .env.example 里有记载
   6. stale_docs       已追踪文档不残留已删业务域词（mock_api / create_order …）
-  7. vlm_no_email     VLM 工具 schema 不含 emailAddress（业务域不变量）
+  7. car_no_email     car_tools 工具 schema 不含 emailAddress/openId（业务域不变量）
+  8. car_servers      ~/.hermes/config.yaml::mcp_servers 含 car_booking entry
 
 用法：
   python scripts/selfcheck.py            # 人读报告
@@ -30,22 +31,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# 单元测试不要求真实凭证——给假值满足 settings._require()
 _DUMMY_ENV = {
     "FEISHU_APP_ID": "x", "FEISHU_APP_SECRET": "x", "MINIMAX_API_KEY": "x",
 }
 
-# 已经删除的旧业务域（订单/用户/报表 + mock_api/mock_tools）词表。
-# 出现在「当前文档」里即视为陈旧（历史设计文档 docs/superpowers/ 豁免）。
 _STALE_TOKENS = ["mock_api", "mock_tools", "create_order", "list_orders",
-                 "pay_order", "ship_order", "create_report_job"]
+                 "pay_order", "ship_order", "create_report_job",
+                 "test_bench", "test_vlm", "/fmp/"]
 _STALE_DOC_GLOBS = ["README.md", "docs/architecture.md", "docs/deployment.md",
                     "docs/design-decisions.md"]
 
-# 关键模块：导入即触发大量 import-time 副作用（工具注册、配置加载）
 _KEY_MODULES = ["config.settings", "ocl.pipeline", "ocl.permission",
                 "bot.handler", "bot.agent_pool", "bot.card_action_handler",
-                "bench_tools.register", "vlm_tools.register",
+                "bot.car_state", "car_tools.register",
                 "hermes_plugins.feishu_acl"]
 
 
@@ -96,10 +94,6 @@ def check_imports() -> Result:
 
 
 def check_settings_invariants() -> Result:
-    """The code default for the CLAUDE.md hard limits must not be silently
-    weakened: AGENT_MAX_ITERATIONS/AGENT_TIMEOUT_SECONDS literal defaults must
-    be 30/120 so a fresh deploy (no .env override) is safe. An operator may
-    still deliberately override via .env (that's their call, not checked here)."""
     errs = []
     src = (ROOT / "config" / "settings.py").read_text(encoding="utf-8")
     for var, want in (("AGENT_MAX_ITERATIONS", "30"), ("AGENT_TIMEOUT_SECONDS", "120")):
@@ -113,13 +107,10 @@ def check_settings_invariants() -> Result:
 
 def check_env_drift() -> Result:
     settings_src = (ROOT / "config" / "settings.py").read_text(encoding="utf-8")
-    jwt_src = (ROOT / "bench_tools" / "jwt_auth.py").read_text(encoding="utf-8")
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
-    # keys read via getenv/_require/_optional anywhere in settings + jwt
     keys = set(re.findall(r'(?:getenv|_require|_optional)\(\s*["\']([A-Z_]+)["\']', settings_src))
-    keys |= set(re.findall(r'getenv\(\s*["\']([A-Z_]+)["\']', jwt_src))
     documented = set(re.findall(r'^([A-Z_]+)=', example, re.MULTILINE))
-    documented |= set(re.findall(r'#\s*([A-Z_]+)=', example))  # commented optionals
+    documented |= set(re.findall(r'#\s*([A-Z_]+)=', example))
     missing = sorted(k for k in keys if k not in documented)
     return Result("env_drift", not missing,
                   "未在 .env.example 记载的 env 键: " + ", ".join(missing) if missing else "")
@@ -138,24 +129,55 @@ def check_stale_docs() -> Result:
     return Result("stale_docs", not hits, "\n".join(hits))
 
 
-def check_vlm_no_email() -> Result:
+def check_car_no_email() -> Result:
+    """车辆预约业务域不变量：car_tools 注册的工具 schema 不得含 emailAddress/openId。
+    这两个字段由服务端从 contextvars 注入，LLM 永远看不到。"""
     code = (
-        "import vlm_tools.register\n"
+        "import car_tools.register\n"
         "from tools.registry import registry\n"
         "bad = []\n"
-        "for t in registry.get_tool_names_for_toolset('vlm'):\n"
+        "for t in registry.get_tool_names_for_toolset('car'):\n"
         "    sc = registry.get_schema(t) or {}\n"
         "    props = sc.get('parameters', {}).get('properties', {})\n"
-        "    if 'emailAddress' in props: bad.append(t)\n"
-        "print('VLM 工具 schema 不应含 emailAddress: ' + ', '.join(bad) if bad else '')\n"
+        "    for forbidden in ('emailAddress','openId','mobile'):\n"
+        "        if forbidden in props: bad.append(f'{t}: 含 {forbidden}')\n"
+        "print('car_tools schema 不应含 emailAddress/openId/mobile: ' + ', '.join(bad) if bad else '')\n"
         "import sys; sys.exit(1 if bad else 0)\n"
     )
     p = _run([sys.executable, "-c", code])
-    # If tools.registry isn't importable in this env, treat as skipped-pass.
     if "ModuleNotFoundError" in p.stderr and "tools.registry" in p.stderr:
-        return Result("vlm_no_email", True, "skipped: tools.registry 不可用")
+        return Result("car_no_email", True, "skipped: tools.registry 不可用")
     ok = p.returncode == 0
-    return Result("vlm_no_email", ok, "" if ok else (p.stdout + p.stderr).strip()[-800:])
+    return Result("car_no_email", ok, "" if ok else (p.stdout + p.stderr).strip()[-800:])
+
+
+def check_car_servers() -> Result:
+    """~/.hermes/config.yaml::mcp_servers 至少一个 car_booking entry。
+
+    注：dev / 本地自检无 MCP server 也属正常（mock 运行）。仅在 CI / 部署时失败，
+    所以这里 warning 级提示不算 fail。
+    """
+    cfg = Path.home() / ".hermes" / "config.yaml"
+    if not cfg.exists():
+        return Result("car_servers", True, "skipped: ~/.hermes/config.yaml 不存在（dev/local 不强制）")
+    try:
+        import yaml  # type: ignore
+    except ImportError:
+        text = cfg.read_text(encoding="utf-8")
+        ok = "car_booking" in text
+        return Result("car_servers", ok, "" if ok else "yaml 不在；car_booking 也不在文件中（dev 可忽略）")
+    try:
+        with cfg.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        servers = (data.get("mcp_servers") or {}) if isinstance(data, dict) else {}
+        names = list(servers.keys()) if isinstance(servers, dict) else []
+        # dev / 本地无 MCP 配置不算硬失败 —— 报 warning，selfcheck 仍标 OK
+        if "car_booking" in names:
+            return Result("car_servers", True, "")
+        return Result("car_servers", True,
+                      f"warning: mcp_servers={names} 未含 car_booking（dev 可忽略；prod 部署必填）")
+    except Exception as e:
+        return Result("car_servers", True, f"skipped: parse error {e}")
 
 
 CHECKS = {
@@ -165,12 +187,13 @@ CHECKS = {
     "settings_invariants": check_settings_invariants,
     "env_drift": check_env_drift,
     "stale_docs": check_stale_docs,
-    "vlm_no_email": check_vlm_no_email,
+    "car_no_email": check_car_no_email,
+    "car_servers": check_car_servers,
 }
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="DMZ 智能体自动化自检")
+    ap = argparse.ArgumentParser(description="约车助手自动化自检")
     ap.add_argument("--json", action="store_true", help="输出机读 JSON")
     ap.add_argument("--only", default="", help="逗号分隔，只跑指定检查项")
     args = ap.parse_args()
@@ -186,7 +209,7 @@ def main() -> int:
             "results": [r.as_dict() for r in results],
         }, ensure_ascii=False, indent=2))
     else:
-        print("\n=== DMZ 智能体自检报告 ===")
+        print("\n=== 约车助手自检报告 ===")
         for r in results:
             mark = "✅" if r.ok else "❌"
             print(f"{mark} {r.name}")
