@@ -1,16 +1,24 @@
-"""bot/car_booking_fsm.py 单元测试：13 状态机。"""
+"""bot/car_booking_fsm.py 单元测试：14 状态机。"""
+import json
 import pytest
 from bot.car_booking_fsm import (
     CarBookingFSM,
     STATE_START,
     STATE_DIRECT_BY_ID,
     STATE_SELECT_VEHICLE_TYPE,
+    STATE_SELECT_FROM_LIST,
+    STATE_DURATION_CONFIRM,
+    STATE_SELECT_TIME,
     advance,
+    _resolve_vehicle_from_text,
+    _match_slots,
 )
+from bot import car_state
+from car_tools import mcp_client as _mc
 
 
 def test_states_defined():
-    """13 个状态名必须存在（spec §3.2）。"""
+    """14 个状态名必须存在（spec §3.2）。"""
     expected = {
         "STATE_START", "STATE_DIRECT_BY_ID", "STATE_SELECT_VEHICLE_TYPE",
         "STATE_CONFIRM_CHIP", "STATE_VEHICLE_ENTRY", "STATE_SELECT_DURATION",
@@ -31,7 +39,6 @@ def test_fsm_class_instantiable():
 
 def test_advance_start_returns_entry_card():
     """START → 入口卡（车型按钮 + 直接输入编号按钮）。"""
-    from bot import car_state
     car_state.clear("ou_t1")
     new_state, resp = advance("ou_t1", "")
     assert new_state == "SELECT_VEHICLE_TYPE"
@@ -40,7 +47,187 @@ def test_advance_start_returns_entry_card():
 
 def test_advance_select_vehicle_type_button():
     """SELECT_VEHICLE_TYPE 收车型按钮 → CONFIRM_CHIP 或 VEHICLE_ENTRY。"""
-    from bot import car_state
     car_state.save("ou_t2", state="SELECT_VEHICLE_TYPE")
     new_state, resp = advance("ou_t2", "大F车")
     assert new_state in ("CONFIRM_CHIP", "VEHICLE_ENTRY")
+
+
+# ── _resolve_vehicle_from_text helper ─────────────────────────────────────────
+
+def test_resolve_by_index():
+    """数字 → 列表第 N 个（1-based）。"""
+    candidates = [
+        {"vehicle_no": "PNV001"}, {"vehicle_no": "PNV002"}, {"vehicle_no": "PNV003"},
+    ]
+    assert _resolve_vehicle_from_text("1", candidates)["vehicle_no"] == "PNV001"
+    assert _resolve_vehicle_from_text("3", candidates)["vehicle_no"] == "PNV003"
+
+
+def test_resolve_by_full_id():
+    """完整 vehicle_no（大小写不敏感）。"""
+    candidates = [{"vehicle_no": "SNV018"}, {"vehicle_no": "PNV003"}]
+    assert _resolve_vehicle_from_text("snv018", candidates)["vehicle_no"] == "SNV018"
+    assert _resolve_vehicle_from_text("PNV003", candidates)["vehicle_no"] == "PNV003"
+
+
+def test_resolve_by_suffix():
+    """后缀匹配（≥3 字符）。"""
+    candidates = [{"vehicle_no": "SNV018"}, {"vehicle_no": "PNV003"}]
+    assert _resolve_vehicle_from_text("SNV018", candidates)["vehicle_no"] == "SNV018"
+    # ≥3 才匹配
+    assert _resolve_vehicle_from_text("003", candidates)["vehicle_no"] == "PNV003"
+    # 短串不匹配
+    assert _resolve_vehicle_from_text("03", candidates) is None
+
+
+def test_resolve_returns_none():
+    """空 / 越界 / 无匹配 → None。"""
+    assert _resolve_vehicle_from_text("", []) is None
+    assert _resolve_vehicle_from_text("99", [{"vehicle_no": "PNV001"}]) is None
+    assert _resolve_vehicle_from_text("garbage", [{"vehicle_no": "PNV001"}]) is None
+
+
+# ── _match_slots helper ──────────────────────────────────────────────────────
+
+def test_match_slots_returns_three_candidates():
+    """≤3 个候选时段，duration_minutes=120 走完应返非空。"""
+    slots = _match_slots("PNV001", 120)
+    assert len(slots) == 3
+    assert all("start" in s and "end" in s and "label" in s for s in slots)
+
+
+def test_match_slots_8h_cap():
+    """>8h（480 分钟）→ 空列表。"""
+    assert _match_slots("PNV001", 500) == []
+
+
+# ── SELECT_FROM_LIST state ───────────────────────────────────────────────────
+
+class _FakeMcpWithCars:
+    """mock hermes registry：fetch_available_vehicles 返 5 辆车。"""
+
+    def call(self, tool_name, args, timeout=10):
+        if tool_name == "fetch_available_vehicles":
+            return {"items": [
+                {"vehicleNo": f"PNV{i:03d}", "vehicleType": "DM2",
+                 "platform": "Xavier", "licensePlate": f"沪X{i:03d}"}
+                for i in range(5)
+            ]}
+        return {}
+
+
+def test_advance_select_from_list_returns_table(monkeypatch):
+    """SELECT_FROM_LIST 查车 → 表格卡 + 缓存 last_vehicles 到 car_state。"""
+    monkeypatch.setattr(_mc, "_client", _FakeMcpWithCars())
+    car_state.save("ou_t3", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=60)
+    new_state, resp = advance("ou_t3", "")
+    assert new_state == "SELECT_FROM_LIST"
+    assert "card" in resp
+    pending = car_state.get("ou_t3")
+    assert len(pending.last_vehicles) == 5
+    assert pending.last_vehicles[0]["vehicle_no"] == "PNV000"
+    car_state.clear("ou_t3")
+
+
+def test_advance_select_from_list_no_cars(monkeypatch):
+    """查车无结果 → 空表卡，仍留在 SELECT_FROM_LIST。"""
+
+    class _Empty:
+        def call(self, tool_name, args, timeout=10):
+            return {"items": []}
+
+    monkeypatch.setattr(_mc, "_client", _Empty())
+    car_state.save("ou_t3b", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=60)
+    new_state, resp = advance("ou_t3b", "")
+    assert new_state == "SELECT_FROM_LIST"
+    pending = car_state.get("ou_t3b")
+    assert pending.last_vehicles == []
+    car_state.clear("ou_t3b")
+
+
+def test_advance_select_from_list_fetch_error(monkeypatch):
+    """查车抛异常 → 空列表 + 留在 SELECT_FROM_LIST。"""
+
+    class _Fail:
+        def call(self, tool_name, args, timeout=10):
+            from car_tools.mcp_client import McpError
+            raise McpError("upstream timeout")
+
+    monkeypatch.setattr(_mc, "_client", _Fail())
+    car_state.save("ou_t3c", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=60)
+    new_state, resp = advance("ou_t3c", "")
+    assert new_state == "SELECT_FROM_LIST"
+    pending = car_state.get("ou_t3c")
+    assert pending.last_vehicles == []
+    car_state.clear("ou_t3c")
+
+
+# ── DURATION_CONFIRM state ──────────────────────────────────────────────────
+
+def test_advance_duration_confirm_by_index(monkeypatch):
+    """DURATION_CONFIRM 收「选 1」→ 写 car_state + 渲染时段按钮。"""
+    candidates = [
+        {"vehicle_no": "PNV000", "vehicle_type": "DM2", "platform": "Xavier",
+         "license_plate": "沪X000"},
+        {"vehicle_no": "PNV001", "vehicle_type": "DM2", "platform": "Xavier",
+         "license_plate": "沪X001"},
+    ]
+    car_state.save("ou_t4", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=120, last_vehicles=candidates)
+    new_state, resp = advance("ou_t4", "选 1")
+    assert new_state == "INPUT_TASK"
+    assert "buttons" in resp  # 候选时段按钮
+    pending = car_state.get("ou_t4")
+    assert pending.vehicle_no == "PNV000"
+    car_state.clear("ou_t4")
+
+
+def test_advance_duration_confirm_by_full_id(monkeypatch):
+    """DURATION_CONFIRM 收「PNV001」→ 解析为第二个候选。"""
+    candidates = [
+        {"vehicle_no": "PNV000", "vehicle_type": "DM2", "platform": "Xavier"},
+        {"vehicle_no": "PNV001", "vehicle_type": "DM2", "platform": "Xavier"},
+    ]
+    car_state.save("ou_t5", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=60, last_vehicles=candidates)
+    new_state, resp = advance("ou_t5", "PNV001")
+    assert new_state == "INPUT_TASK"
+    pending = car_state.get("ou_t5")
+    assert pending.vehicle_no == "PNV001"
+    car_state.clear("ou_t5")
+
+
+def test_advance_duration_confirm_unrecognized(monkeypatch):
+    """DURATION_CONFIRM 收未识别文本 → 保持状态 + 提示。"""
+    candidates = [{"vehicle_no": "PNV000", "vehicle_type": "DM2"}]
+    car_state.save("ou_t6", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=60, last_vehicles=candidates)
+    new_state, resp = advance("ou_t6", "garbage")
+    assert new_state == "DURATION_CONFIRM"
+    assert "未识别车辆" in resp["text"]
+    car_state.clear("ou_t6")
+
+
+def test_advance_duration_confirm_no_slots(monkeypatch):
+    """_match_slots 返空 → SELECT_TIME 兜底。"""
+    candidates = [{"vehicle_no": "PNV000", "vehicle_type": "DM2"}]
+    car_state.save("ou_t7", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
+                   duration_minutes=600, last_vehicles=candidates)  # > 8h cap
+    new_state, resp = advance("ou_t7", "选 1")
+    assert new_state == "SELECT_TIME"
+    assert "buttons" in resp
+    car_state.clear("ou_t7")
+
+
+# ── SELECT_TIME state ───────────────────────────────────────────────────────
+
+def test_advance_select_time_to_input_task():
+    """SELECT_TIME 收任何文本 → INPUT_TASK。"""
+    car_state.save("ou_t8", state="SELECT_TIME", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120)
+    new_state, resp = advance("ou_t8", "1小时后")
+    assert new_state == "INPUT_TASK"
+    car_state.clear("ou_t8")
