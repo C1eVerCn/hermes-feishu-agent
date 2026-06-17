@@ -64,6 +64,9 @@ class CarPendingState:
     # 元素结构：{"vehicle_no": "PNV332", "vehicle_type": "DM2", "platform": "Xavier",
     #           "license_plate": "沪FPNV332", "vin": "..."}
     last_vehicles: list = field(default_factory=list)
+    # 最近的时段候选（DURATION_CONFIRM 模糊匹配结果），元素：
+    # {"start": "2026-06-17 14:00", "end": "2026-06-17 16:00", "label": "06-17 14:00 ~ 16:00"}
+    last_slots: list = field(default_factory=list)
     # 用户的查询条件（缓存到卡片头部，handler 用来补回 car_state 的其他字段）
     last_query: dict = field(default_factory=dict)
     # DC-10 防循环计数器：FSM 同一状态连续重试次数，超过阈值则 abort

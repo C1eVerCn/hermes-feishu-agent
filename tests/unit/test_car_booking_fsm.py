@@ -168,7 +168,7 @@ def test_advance_select_from_list_fetch_error(monkeypatch):
 # ── DURATION_CONFIRM state ──────────────────────────────────────────────────
 
 def test_advance_duration_confirm_by_index(monkeypatch):
-    """DURATION_CONFIRM 收「选 1」→ 写 car_state + 渲染时段按钮。"""
+    """DURATION_CONFIRM 收「选 1」（vehicle_no 未定）→ 写 vehicle + 渲染时段按钮。"""
     candidates = [
         {"vehicle_no": "PNV000", "vehicle_type": "DM2", "platform": "Xavier",
          "license_plate": "沪X000"},
@@ -178,15 +178,17 @@ def test_advance_duration_confirm_by_index(monkeypatch):
     car_state.save("ou_t4", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=120, last_vehicles=candidates)
     new_state, resp = advance("ou_t4", "选 1")
-    assert new_state == "INPUT_TASK"
+    # 新设计：先解析 vehicle → 留在 DURATION_CONFIRM 展示时段按钮
+    assert new_state == "DURATION_CONFIRM"
     assert "buttons" in resp  # 候选时段按钮
     pending = car_state.get("ou_t4")
     assert pending.vehicle_no == "PNV000"
+    assert len(pending.last_slots) == 3  # 候选时段已缓存
     car_state.clear("ou_t4")
 
 
 def test_advance_duration_confirm_by_full_id(monkeypatch):
-    """DURATION_CONFIRM 收「PNV001」→ 解析为第二个候选。"""
+    """DURATION_CONFIRM 收「PNV001」（vehicle_no 未定）→ 解析为第二个候选。"""
     candidates = [
         {"vehicle_no": "PNV000", "vehicle_type": "DM2", "platform": "Xavier"},
         {"vehicle_no": "PNV001", "vehicle_type": "DM2", "platform": "Xavier"},
@@ -194,14 +196,14 @@ def test_advance_duration_confirm_by_full_id(monkeypatch):
     car_state.save("ou_t5", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=60, last_vehicles=candidates)
     new_state, resp = advance("ou_t5", "PNV001")
-    assert new_state == "INPUT_TASK"
+    assert new_state == "DURATION_CONFIRM"
     pending = car_state.get("ou_t5")
     assert pending.vehicle_no == "PNV001"
     car_state.clear("ou_t5")
 
 
 def test_advance_duration_confirm_unrecognized(monkeypatch):
-    """DURATION_CONFIRM 收未识别文本 → 保持状态 + 提示。"""
+    """DURATION_CONFIRM 收未识别文本（vehicle_no 未定）→ 保持 + 提示。"""
     candidates = [{"vehicle_no": "PNV000", "vehicle_type": "DM2"}]
     car_state.save("ou_t6", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=60, last_vehicles=candidates)
@@ -212,7 +214,7 @@ def test_advance_duration_confirm_unrecognized(monkeypatch):
 
 
 def test_advance_duration_confirm_no_slots(monkeypatch):
-    """_match_slots 返空 → SELECT_TIME 兜底。"""
+    """_match_slots 返空（duration>8h）→ SELECT_TIME 兜底。"""
     candidates = [{"vehicle_no": "PNV000", "vehicle_type": "DM2"}]
     car_state.save("ou_t7", state="DURATION_CONFIRM", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=600, last_vehicles=candidates)  # > 8h cap
@@ -231,3 +233,239 @@ def test_advance_select_time_to_input_task():
     new_state, resp = advance("ou_t8", "1小时后")
     assert new_state == "INPUT_TASK"
     car_state.clear("ou_t8")
+
+
+# ── DIRECT_BY_ID state ────────────────────────────────────────────────────
+
+def test_advance_direct_by_id_valid_format():
+    """DIRECT_BY_ID 收有效编号 → SELECT_DURATION。"""
+    car_state.save("ou_t9", state="DIRECT_BY_ID")
+    new_state, resp = advance("ou_t9", "SNV018")
+    assert new_state == "SELECT_DURATION"
+    assert "SNV018" in resp["text"]
+    pending = car_state.get("ou_t9")
+    assert pending.vehicle_no == "SNV018"
+    car_state.clear("ou_t9")
+
+
+def test_advance_direct_by_id_lowercase_normalized():
+    """DIRECT_BY_ID 小写编号也接受。"""
+    car_state.save("ou_t9b", state="DIRECT_BY_ID")
+    new_state, resp = advance("ou_t9b", "snv018")
+    assert new_state == "SELECT_DURATION"
+    assert car_state.get("ou_t9b").vehicle_no == "SNV018"
+    car_state.clear("ou_t9b")
+
+
+def test_advance_direct_by_id_invalid_format():
+    """DIRECT_BY_ID 格式不符 → 保持 + 提示。"""
+    car_state.save("ou_t9c", state="DIRECT_BY_ID")
+    new_state, resp = advance("ou_t9c", "garbage")
+    assert new_state == "DIRECT_BY_ID"
+    assert "编号格式不符" in resp["text"]
+    car_state.clear("ou_t9c")
+
+
+# ── DURATION_CONFIRM 时段子流程 ─────────────────────────────────────────────
+
+def test_advance_duration_confirm_pick_slot_by_index():
+    """DURATION_CONFIRM vehicle_no 已定 → 选时段 1 → INPUT_TASK。"""
+    slots = [
+        {"start": "2026-06-17 14:00", "end": "2026-06-17 16:00",
+         "label": "06-17 14:00 ~ 16:00"},
+        {"start": "2026-06-17 18:00", "end": "2026-06-17 20:00",
+         "label": "06-17 18:00 ~ 20:00"},
+    ]
+    car_state.save("ou_t10", state="DURATION_CONFIRM", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   last_slots=slots)
+    new_state, resp = advance("ou_t10", "1")
+    assert new_state == "INPUT_TASK"
+    pending = car_state.get("ou_t10")
+    assert pending.start_time == "2026-06-17 14:00"
+    assert pending.time_range_start == "2026-06-17 14:00"
+    car_state.clear("ou_t10")
+
+
+def test_advance_duration_confirm_pick_slot_by_full_time():
+    """DURATION_CONFIRM 用完整时间反查时段。"""
+    slots = [
+        {"start": "2026-06-17 14:00", "end": "2026-06-17 16:00", "label": "x"},
+        {"start": "2026-06-17 18:00", "end": "2026-06-17 20:00", "label": "y"},
+    ]
+    car_state.save("ou_t10b", state="DURATION_CONFIRM", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   last_slots=slots)
+    new_state, resp = advance("ou_t10b", "2026-06-17 18:00")
+    assert new_state == "INPUT_TASK"
+    pending = car_state.get("ou_t10b")
+    assert pending.start_time == "2026-06-17 18:00"
+    car_state.clear("ou_t10b")
+
+
+def test_advance_duration_confirm_pick_slot_unrecognized():
+    """DURATION_CONFIRM 时段未识别 → 保持。"""
+    slots = [{"start": "2026-06-17 14:00", "end": "2026-06-17 16:00", "label": "x"}]
+    car_state.save("ou_t10c", state="DURATION_CONFIRM", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   last_slots=slots)
+    new_state, resp = advance("ou_t10c", "99")
+    assert new_state == "DURATION_CONFIRM"
+    assert "未识别时段" in resp["text"]
+    car_state.clear("ou_t10c")
+
+
+# ── INPUT_TASK state ──────────────────────────────────────────────────────
+
+def test_advance_input_task_saves_text():
+    """INPUT_TASK 收文本 → 写 task_name → INPUT_LOCATION。"""
+    car_state.save("ou_t11", state="INPUT_TASK", vehicle_no="PNV000",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00")
+    new_state, resp = advance("ou_t11", "MFF调试")
+    assert new_state == "INPUT_LOCATION"
+    pending = car_state.get("ou_t11")
+    assert pending.task_name == "MFF调试"
+    car_state.clear("ou_t11")
+
+
+def test_advance_input_task_empty_keeps_state():
+    """INPUT_TASK 收空文本 → 保持 + 提示。"""
+    car_state.save("ou_t11b", state="INPUT_TASK", vehicle_no="PNV000")
+    new_state, resp = advance("ou_t11b", "")
+    assert new_state == "INPUT_TASK"
+    assert "任务名称不能为空" in resp["text"]
+    car_state.clear("ou_t11b")
+
+
+# ── INPUT_LOCATION state ──────────────────────────────────────────────────
+
+def test_advance_input_location_saves_and_goes_to_confirm():
+    """INPUT_LOCATION 收文本 → 写 location → CONFIRM 卡。"""
+    car_state.save("ou_t12", state="INPUT_LOCATION", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00", task_name="MFF调试")
+    new_state, resp = advance("ou_t12", "上海")
+    assert new_state == "CONFIRM"
+    assert "card" in resp
+    pending = car_state.get("ou_t12")
+    assert pending.location == "上海"
+    car_state.clear("ou_t12")
+
+
+# ── CONFIRM state ─────────────────────────────────────────────────────────
+
+def test_advance_confirm_to_commit():
+    """CONFIRM 收「确认」→ COMMIT。"""
+    car_state.save("ou_t13", state="CONFIRM", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00",
+                   task_name="MFF调试", location="上海")
+    new_state, resp = advance("ou_t13", "确认")
+    assert new_state == "COMMIT"
+    car_state.clear("ou_t13")
+
+
+def test_advance_confirm_cancel_returns_to_start():
+    """CONFIRM 收「取消」→ clear state → START。"""
+    car_state.save("ou_t13b", state="CONFIRM", vehicle_no="PNV000",
+                   task_name="MFF调试", location="上海")
+    new_state, resp = advance("ou_t13b", "取消")
+    assert new_state == "START"
+    assert car_state.get("ou_t13b") is None  # 已清
+
+
+def test_advance_confirm_modify_returns_to_task():
+    """CONFIRM 收「修改」→ INPUT_TASK。"""
+    car_state.save("ou_t13c", state="CONFIRM", vehicle_no="PNV000",
+                   task_name="MFF调试", location="上海")
+    new_state, resp = advance("ou_t13c", "修改")
+    assert new_state == "INPUT_TASK"
+    car_state.clear("ou_t13c")
+
+
+# ── COMMIT state ──────────────────────────────────────────────────────────
+
+def test_advance_commit_to_success(monkeypatch):
+    """COMMIT 调 _commit_single_vehicle_reservation → SUCCESS 卡。"""
+    from car_tools import handlers as _h
+
+    class _FakeHandlers:
+        @staticmethod
+        def _commit_single_vehicle_reservation(args, **_):
+            return json.dumps({"vehicle_no": "PNV000", "vehicle_type": "DM2",
+                               "platform": "Xavier", "license_plate": "沪X000",
+                               "start_time": "2026-06-17 14:00",
+                               "end_time": "2026-06-17 16:00",
+                               "task_name": "MFF调试", "location": "上海"})
+
+    monkeypatch.setattr(_h, "_commit_single_vehicle_reservation",
+                        _FakeHandlers._commit_single_vehicle_reservation)
+    car_state.save("ou_t14", state="COMMIT", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   start_time="2026-06-17 14:00", end_time="2026-06-17 16:00",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00",
+                   task_name="MFF调试", location="上海")
+    new_state, resp = advance("ou_t14", "")
+    assert new_state == "SUCCESS"
+    assert "card" in resp
+    car_state.clear("ou_t14")
+
+
+def test_advance_commit_error_returns_to_start(monkeypatch):
+    """COMMIT 调 commit 失败 → START + 错误提示。"""
+    from car_tools import handlers as _h
+
+    class _Fail:
+        @staticmethod
+        def _commit_single_vehicle_reservation(args, **_):
+            return json.dumps({"error": "车辆已被占用"})
+
+    monkeypatch.setattr(_h, "_commit_single_vehicle_reservation",
+                        _Fail._commit_single_vehicle_reservation)
+    car_state.save("ou_t14b", state="COMMIT", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   start_time="2026-06-17 14:00", end_time="2026-06-17 16:00",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00",
+                   task_name="MFF调试", location="上海")
+    new_state, resp = advance("ou_t14b", "")
+    assert new_state == "START"
+    assert "提交失败" in resp["text"]
+    car_state.clear("ou_t14b")
+
+
+# ── SUCCESS state ─────────────────────────────────────────────────────────
+
+def test_advance_success_clears_state():
+    """SUCCESS 收任何文本 → clear + 回 START。"""
+    car_state.save("ou_t15", state="SUCCESS", vehicle_no="PNV000",
+                   task_name="MFF调试")
+    new_state, resp = advance("ou_t15", "")
+    assert new_state == "START"
+    assert car_state.get("ou_t15") is None  # 清空
+
+
+# ── 端到端多轮 ─────────────────────────────────────────────────────────────
+
+def test_e2e_pick_slot_through_input_task():
+    """DURATION_CONFIRM 选时段 → INPUT_TASK。"""
+    slots = [
+        {"start": "2026-06-17 14:00", "end": "2026-06-17 16:00", "label": "x"},
+    ]
+    car_state.save("ou_e2e", state="DURATION_CONFIRM", vehicle_no="PNV000",
+                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   last_slots=slots)
+    # 选时段
+    new_state, _ = advance("ou_e2e", "1")
+    assert new_state == "INPUT_TASK"
+    # 输入任务
+    new_state, _ = advance("ou_e2e", "MFF调试")
+    assert new_state == "INPUT_LOCATION"
+    # 输入地点
+    new_state, _ = advance("ou_e2e", "上海")
+    assert new_state == "CONFIRM"
+    car_state.clear("ou_e2e")
