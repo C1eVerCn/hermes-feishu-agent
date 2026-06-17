@@ -1,154 +1,197 @@
-"""Handle Feishu interactive-card button callbacks.
-Deterministic (no LLM): inject identity → OCL role gate → call the tool handler.
-Returns (toast_text, updated_card_or_None). value never carries email — the
-clicker's open_id resolves it, so a forged value cannot impersonate."""
+"""Handle Feishu interactive-card button callbacks (车辆预约域).
+
+支持的 action：
+- select_vehicle    用户在「车辆列表」卡片点 [选N] → 写 car_state（带 dry_run）
+- confirm_booking   用户在「确认」卡片点 [确认] → 调 _commit_vehicle_reservation
+- cancel_flow       用户在任意卡片点 [取消] → clear car_state
+
+确定性强：不经过 LLM，路径固定。
+"""
 import json
 import logging
 
-from ocl import identity, permission
-from ocl.tool_guard import set_current_email, set_current_user
-from bench_tools import handlers
-from bot import reservation_store
-from bot import feedback
-from feishu import notify
+from ocl import identity
+from ocl.tool_guard import set_current_caller, CallerIdentity
+from car_tools import handlers as car_handlers
+from car_tools import card_builder as car_card_builder
+from bot import car_state
+from bot import car_booking_fsm
+from feishu import sender
 
 log = logging.getLogger(__name__)
 
-# action → tool注册名（handler 按同名在调用时解析）
-_ACTION_TOOL = {
-    "cancel":  "cancel_reservation",
-    "approve": "approve_reservation",
-    "return":  "return_bench",
-}
-
-
-def _notify_dispatchers_for_reservation(bench_no: str, start_time: str,
-                                         applicant_name: str,
-                                         applicant_email: str,
-                                         api_message: str) -> int:
-    """Best-effort: DM every dispatcher whose email appears in the success
-    message, with a heads-up that a new reservation is awaiting their
-    approval. Returns the number of dispatchers successfully notified.
-
-    Uses `submit_dispatchers_by_email_blocking` so the caller gets an
-    accurate count to show in the applicant-confirmation card. Safe
-    here because this is called from the confirm-text path
-    (bot/handler.py), not the WS card-callback hot path.
-    """
-    emails = notify.extract_scheduler_emails(api_message)
-    if not emails:
-        log.info("notify_dispatchers_skip: no scheduler emails parsed from api_message")
-        return 0
-    subject = "📋 新预约待审批"
-    body = (f"申请人：{applicant_name or applicant_email}\n"
-            f"台架编号：{bench_no}\n"
-            f"开始时间：{start_time}\n"
-            "请尽快登录系统审批。")
-    return notify.submit_dispatchers_by_email_blocking(
-        emails, subject, body, timeout=30.0)
-
-
-def _find_reservation_id(bench_no: str, start_time: str, end_time: str,
-                          email: str) -> str:
-    """Look up the most recent reservation matching (benchNo, startTime, endTime)
-    via the bench API's myReservations endpoint, so we can persist a mapping
-    for later approval notification. Caller MUST ensure set_current_email() is
-    still in scope (we do that by keeping the try/finally wrapping this)."""
-    try:
-        from bench_tools import handlers as bench_handlers
-        raw = bench_handlers.list_my_reservations(
-            {"benchNo": bench_no, "startTime": start_time, "endTime": end_time}
-        )
-        data = json.loads(raw).get("data") or []
-        if not data:
-            return ""
-        # most recent (by createTime desc if present, else by id)
-        data.sort(key=lambda r: (r.get("createTime") or "", r.get("id") or ""),
-                  reverse=True)
-        return data[0].get("id", "")
-    except Exception:
-        log.exception("find_reservation_id_failed bench=%s start=%s",
-                      bench_no, start_time)
-        return ""
-
-
-def _notify_applicant_of_approval(bench_no: str, start_time: str, end_time: str) -> None:
-    """If we recorded the applicant's open_id for this reservation, DM them
-    that the reservation is approved. Dispatched fire-and-forget on the
-    notify pool so the WS card-action callback (which has a <50ms return
-    budget) is never blocked by the rate-limit sleep + network round-trip."""
-    rec = reservation_store.find_by_bench_and_time(bench_no, start_time)
-    if not rec:
-        return
-    oid = rec.get("applicant_open_id", "")
-    if not oid:
-        return
-    text = (f"✅ 您的台架预约已通过审批\n"
-            f"台架编号：{bench_no}\n"
-            f"开始时间：{start_time}\n"
-            f"结束时间：{end_time}\n"
-            f"任务：{rec.get('task_name', '')}\n"
-            "请按时使用，使用完毕请归还。")
-    notify.submit_text_to_user(oid, text)
-    log.info("applicant_notify_submitted oid=%s bench=%s", oid, bench_no)
+# fsm_direct_by_id 按钮无 value 字段 —— 用特殊标记符让 FSM 进 DIRECT_BY_ID 状态
+_FSM_DIRECT_BY_ID_MARKER = "__fsm_direct_by_id__"
 
 
 def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | None]:
+    """处理飞书卡片按钮回调。
+
+    Returns: (toast_text, updated_card_or_None)
+    - toast_text: lark 显示的简短反馈（≤100 字）
+    - updated_card_or_None: 替换原卡片的完整 card（None = 不替换）
+    """
     action = value.get("action", "")
     email = identity.email_of(open_id)
-    if not email:
-        return "您还不是平台用户，请联系管理员开通。", None
 
-    if action == "cancel_reserve":
-        return "已取消预约，请重新告知预约信息。", None
+    # 注入身份（commit 路径走 handler 需要 caller）
+    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=None))
 
-    # ── Existing: return / cancel / approve (deterministic) ──────────────
-    if action == "return" and not value.get("returnLocation"):
-        bench = value.get("benchNo", "")
-        return f"请在对话中告诉我 {bench} 的还台地点，例如「归还 {bench}，地点安亭广场」。", None
+    try:
+        # ── 取消流程（任意卡片通用） ─────────────────────────────────
+        if action == "cancel_flow" or action == "cancel_reserve":
+            car_state.clear(open_id)
+            return "已取消本次操作。", None
 
-    tool_name = _ACTION_TOOL.get(action)
-    if tool_name is None:
+        # ── FSM 14 状态机按钮（fsm_*） ──────────────────────────────
+        if action.startswith("fsm_"):
+            return _handle_fsm_button(open_id, chat_id, value)
+
+        # ── 选车（[选N] 按钮） ──────────────────────────────────────
+        if action == "select_vehicle":
+            vehicle_no = value.get("vehicle_no", "")
+            if not vehicle_no:
+                return "车辆编号缺失", None
+            vehicle_type = value.get("vehicle_type", "")
+            platform = value.get("platform", "")
+            license_plate = value.get("license_plate", "")
+            return _handle_select_vehicle(
+                open_id, chat_id, vehicle_no, vehicle_type, platform, license_plate,
+                email)
+
+        # ── 确认预约（[确认] 按钮） ─────────────────────────────────
+        if action == "confirm_booking":
+            return _handle_confirm_booking(open_id, chat_id, value, email)
+
         return "暂不支持该操作。", None
-    fn = getattr(handlers, tool_name)  # resolve at call time (patch/reload-safe)
-
-    if not permission.is_tool_permitted(open_id, tool_name):
-        return "权限不足：该操作需要更高角色。", None
-
-    args = {k: v for k, v in value.items() if k != "action"}
-    set_current_user(open_id)
-    set_current_email(email)
-    try:
-        raw = fn(args)
     finally:
-        set_current_user("")
-        set_current_email("")
+        set_current_caller(CallerIdentity())
 
+
+# ── FSM 按钮回调（fsm_*） ───────────────────────────────────────────────
+
+def _handle_fsm_button(open_id: str, chat_id: str, value: dict
+                        ) -> tuple[str, dict | None]:
+    """fsm_* 按钮 → 翻译为文本 → 调 car_booking_fsm.advance() → 渲染响应。
+
+    翻译规则：
+    - 默认用 value 字段作为 text（"DM2" / "Xavier" / "1小时" 等）
+    - fsm_pick_slot 带 slot_idx → 翻译为 "1" / "2" / "3"
+    - fsm_direct_by_id 无 value → 用特殊标记符
+    """
+    action = value.get("action", "")
+
+    if action == "fsm_pick_slot":
+        slot_idx = value.get("slot_idx", 1)
+        text = str(slot_idx)
+    elif action == "fsm_direct_by_id":
+        text = _FSM_DIRECT_BY_ID_MARKER
+    else:
+        text = str(value.get("value", ""))
+
+    # 调 FSM 主入口
+    new_state, response = car_booking_fsm.advance(open_id, text)
+    log.info("fsm_button user=%s action=%s new_state=%s", open_id, action, new_state)
+
+    # 渲染：toast_text + 替换卡片
+    toast = response.get("text", "")
+    card = response.get("card")
+    if card is None and (response.get("text") or response.get("buttons")):
+        # text + buttons 混合 → 转成 card（飞书 card_action callback 必须返回 card）
+        lines = [response.get("text", "")]
+        for btn in response.get("buttons", []):
+            lines.append(f"  · {btn['text']}")
+        card = {"config": {"wide_screen_mode": True},
+                "elements": [{"tag": "div",
+                              "text": {"tag": "lark_md",
+                                       "content": "\n".join(s for s in lines if s)}}]}
+    return toast, card
+
+
+# ── select_vehicle ─────────────────────────────────────────────────────────
+
+def _handle_select_vehicle(open_id: str, chat_id: str, vehicle_no: str,
+                           vehicle_type: str, platform: str, license_plate: str,
+                           email: str) -> tuple[str, dict | None]:
+    """用户点 [选N] → 写 car_state → 调 _dry_run_vehicle_reservation 渲染确认卡
+    （缺字段则渲染 missing-fields 卡片）。"""
+    car_state.save(
+        open_id,
+        intent="booking",
+        vehicle_no=vehicle_no,
+        vehicle_type=vehicle_type,
+        platform=platform,
+        license_plate=license_plate,
+    )
+
+    # 立即跑一次 dry_run（仅含车辆信息，时间/任务/地点都缺 → 触发 missing_fields）
+    args = {
+        "vehicleNo": vehicle_no,
+        "vehicleType": vehicle_type,
+        "platform": platform,
+        "licensePlate": license_plate,
+    }
+    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=None))
+    raw = car_handlers._dry_run_reservation(args)
     try:
-        parsed = json.loads(raw)
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, ValueError):
         parsed = {"error": raw}
 
-    # Phase 2 self-evolution: record the operation pattern (no message text,
-    # no email — only action/tool/arg-key metadata + success). Best-effort:
-    # a feedback write must never break the card callback.
-    success = ("error" not in parsed) and (parsed.get("code") == 200)
-    err = parsed.get("error") or (None if success else parsed.get("message"))
-    try:
-        feedback.record_card_action(
-            open_id, action, tool_name, list(args.keys()), success, error=err)
-    except Exception:
-        log.exception("feedback.record_card_action failed (non-fatal)")
+    if isinstance(parsed, dict) and "error" in parsed:
+        return parsed["error"], car_card_builder.build_fail_card(parsed["error"])
 
-    if "error" in parsed:
-        detail = parsed["error"].split(":", 1)[-1].strip()
-        return f"操作失败：{detail}", None
-    if parsed.get("code") == 200:
-        # Approval: notify the original applicant
-        if action == "approve" and args.get("approvalResult") in (1, "1"):
-            _notify_applicant_of_approval(
-                args.get("benchNo", ""),
-                args.get("startTime", ""),
-                args.get("endTime", ""))
-        return parsed.get("message", "操作成功"), None
-    return parsed.get("message", "操作失败"), None
+    if isinstance(parsed, dict) and parsed.get("missing_fields"):
+        # 渲染缺字段卡片 + 让用户在主对话流补充字段
+        return ("已选车辆，请补充其他信息", car_card_builder.build_missing_fields_card(parsed["summary"]))
+
+    if isinstance(parsed, dict) and parsed.get("dry_run"):
+        # 全部齐全（极端情况：从 query 阶段已经推断出所有字段）→ 渲染确认卡
+        return ("请确认预约信息", car_card_builder.build_confirm_card(parsed["summary"], parsed.get("args", {})))
+
+    return "操作失败", car_card_builder.build_fail_card("未知状态")
+
+
+# ── confirm_booking ────────────────────────────────────────────────────────
+
+def _handle_confirm_booking(open_id: str, chat_id: str, value: dict,
+                            email: str) -> tuple[str, dict | None]:
+    """用户点 [确认] → 调 _commit_vehicle_reservation。
+
+    权限门控由 L1 (hermes pre_tool_call 钩子) + L2 (guarded() 包裹) 负责；
+    不在调用方再做显式 check。
+    """
+    args = {k: v for k, v in value.items() if k != "action" and v}
+    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=None))
+    raw = car_handlers._commit_single_vehicle_reservation(args)
+    car_state.clear(open_id)
+
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, ValueError):
+        parsed = {"error": raw}
+
+    if isinstance(parsed, dict) and "error" in parsed:
+        return "提交失败", car_card_builder.build_fail_card(parsed["error"], context="提交预约")
+
+    result_dict = parsed.get("data") if isinstance(parsed, dict) and "data" in parsed else parsed
+    if not isinstance(result_dict, dict):
+        return "提交失败", car_card_builder.build_fail_card("MCP 返回格式异常")
+
+    # 异步通知调度员
+    from car_tools import notify_dispatchers
+    notify_dispatchers.submit_reservation_dispatchers(result_dict)
+
+    # 持久化 reservation → applicant 映射（用于审批后 DM 申请人）
+    from bot import reservation_store
+    rid = result_dict.get("reservation_id") or result_dict.get("reservationId") or ""
+    key = rid or f"car|{result_dict.get('vehicle_no','')}|{result_dict.get('start_time','')}"
+    reservation_store.save(
+        key, open_id, email,
+        result_dict.get("vehicle_no", ""),
+        result_dict.get("start_time", ""),
+        result_dict.get("end_time", ""),
+        result_dict.get("task_name", ""),
+    )
+
+    return "提交成功，等待调度员审批", car_card_builder.build_success_card(result_dict)

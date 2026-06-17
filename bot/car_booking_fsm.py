@@ -226,12 +226,25 @@ def advance(user_id: str, text: str = "") -> tuple[str, dict]:
 def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tuple[str, dict]:
     """内部 advance 逻辑：返回 (new_state, response)。不持久化 state。"""
 
-    # 入口状态：未开始 → 渲染入口卡
+    # 入口状态：未开始 → 渲染入口卡（但若用户直接报编号，跳 DIRECT_BY_ID）
     if current_state == STATE_START:
+        # 优先识别"报编号"快捷路径（spec §3.3 START 行）
+        if text and _VEHICLE_NO_RE.match(text.strip().upper()):
+            car_state.save(user_id, vehicle_no=text.strip().upper())
+            return STATE_SELECT_DURATION, {
+                "text": f"已选 {text.strip().upper()}。请选择用车的时长：",
+                "buttons": [{"text": t, "value": {"action": "fsm_select_duration", "value": t}}
+                            for t in DURATION_BUTTONS]
+            }
         return STATE_SELECT_VEHICLE_TYPE, _entry_card()
 
     # SELECT_VEHICLE_TYPE：收车型按钮或 LLM 抽取的车型
     if current_state == STATE_SELECT_VEHICLE_TYPE:
+        # 卡片回调：用户点"直接输入编号"按钮（无 value，用特殊标记符）
+        if text == "__fsm_direct_by_id__":
+            return STATE_DIRECT_BY_ID, {
+                "text": "请直接输入车辆编号（如 SNV018）：",
+            }
         if text in VEHICLE_TYPE_BUTTONS:
             chip = _single_chip(text)
             car_state.save(user_id, vehicle_type=text, chip=chip or "")
