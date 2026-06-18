@@ -143,6 +143,9 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     elif action in _FSM_MARKERS:
         text = _FSM_MARKERS[action]
     else:
+        # 2026-06-18 form submit（fsm_input_task_form / fsm_input_location_form）：
+        # ws_client 已把 form_value[input_name] 扁平化到 value['value']，
+        # 直接用作 text（用户实际输入）。
         text = str(value.get("value", ""))
 
     # fsm_done_records：让用户看自己的预约（不进 FSM；FSM 只负责清 booking 状态）

@@ -72,25 +72,36 @@ def _extract_card_action(data: P2CardActionTrigger):
     open_id = getattr(op, "open_id", "") or ""
     value = getattr(data.event.action, "value", None) or {}
     if isinstance(value, dict) and not value.get("value"):
-        # 2026-06-18 select_static 兼容：lark-oapi CallBackAction 字段
+        # 2026-06-18 select_static + form 兼容：lark-oapi CallBackAction 字段
         # (lark_oapi/event/callback/model/p2_card_action_trigger.py:38-66):
         #   option:     Optional[str]            ← 单选 select_static 选中 key
         #   options:    Optional[List[str]]      ← 多选 select_static 选中 keys
-        #   form_value: Optional[Dict[str, Any]] ← 旧 SDK / input 组件（不可信，Dict 不能 str()）
-        # 优先级：option(str) > options[0](str) > form_value(str)。空 / 错类型全跳过。
+        #   form_value: Optional[Dict[str, Any]] ← Card 2.0 form submit（input/textarea 字段）
+        #   tag:        Optional[str]            ← 触发元素 tag（"button" / "form" / "select_static"）
+        # 优先级：form_value 第一个 string > option > options[0]
         # getattr 兜底：测试用 SimpleNamespace 可能没这些字段。
         action = data.event.action
-        def _first_str(*names):
-            for n in names:
-                v = getattr(action, n, None)
+        action_tag = getattr(action, "tag", None)
+        # 1) form_value Dict：取第一个 string 值（如 {"task_input": "MFF"} → "MFF"）
+        form_value = getattr(action, "form_value", None)
+        if isinstance(form_value, dict) and form_value:
+            for v in form_value.values():
                 if isinstance(v, str) and v:
-                    return v
-                if isinstance(v, list) and v and isinstance(v[0], str):
-                    return v[0]
-            return None
-        option = _first_str("option", "options", "form_value")
-        if option:
-            value = {**value, "value": option}
+                    value = {**value, "value": v}
+                    break
+        # 2) 还没 value → 退回 select_static option 路径
+        if not value.get("value"):
+            def _first_str(*names):
+                for n in names:
+                    v = getattr(action, n, None)
+                    if isinstance(v, str) and v:
+                        return v
+                    if isinstance(v, list) and v and isinstance(v[0], str):
+                        return v[0]
+                return None
+            option = _first_str("option", "options")
+            if option:
+                value = {**value, "value": option}
     ctx = getattr(data.event, "context", None)
     chat_id = getattr(ctx, "open_chat_id", "") or ""
     log.info("card_action_received open_id=%s chat_id=%s value_keys=%s",

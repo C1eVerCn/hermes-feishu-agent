@@ -193,6 +193,41 @@ def _select_card(title: str, placeholder: str, options: list, action: str) -> di
     ])
 
 
+def _input_form_card(title: str, placeholder: str, button_text: str,
+                     action: str, input_name: str = "input_value",
+                     max_length: int = 100) -> dict:
+    """Card 2.0 form + input + button 卡片（用户点「其它」时显示）。
+
+    飞书 Card 2.0 的 form 元素：内含 input（单行文本输入框）和 button（提交）。
+    用户在 input 里输入文本后点 button，飞书回调事件带：
+      - action.tag = "form"
+      - action.form_value = {input_name: 用户输入的文本}
+      - action.value = button 的 value 字段（{action: "fsm_input_xxx_form"}）
+
+    feishu/ws_client._extract_card_action 把 form_value[input_name] 扁平化到
+    value['value']，让下游 card_action_handler._handle_fsm_button 当作普通按钮
+    value 处理（text = value['value']），进 FSM 后被 _llm_extract_task 抽取为
+    task_name。
+
+    2026-06-18 改：替代之前的"✍️ 请直接输入任务名称" 文本提示，
+    给用户真正的 input field + 确认按钮 UX。
+    """
+    return _card_wrap([
+        {"tag": "div", "text": {"tag": "lark_md", "content": title}},
+        {"tag": "form",
+         "elements": [
+             {"tag": "input",
+              "name": input_name,
+              "placeholder": {"tag": "plain_text", "content": placeholder},
+              "max_length": max_length,
+              "value": {"tag": "plain_text", "content": ""}},
+             {"tag": "button", "type": "primary",
+              "text": {"tag": "plain_text", "content": button_text},
+              "value": {"action": action}},
+         ]},
+    ])
+
+
 def _type_card() -> dict:
     """SELECT_VEHICLE_TYPE：单选下拉（替代原 15 个 button）。
 
@@ -766,11 +801,18 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
 
     # INPUT_TASK：LLM 抽 taskName（spec §3.4 ④；spec §4.2 prompt 不补全）
     if current_state == STATE_INPUT_TASK:
-        # 2026-06-18 引导性增强：用户点「其它」按钮 → 走自定义输入路径，
-        # 渲染纯文本提示（不再展示示例按钮，避免重复）。
+        # 2026-06-18 form UX：用户点「其它」按钮 → 渲染 form+input 卡，
+        # 用户在卡片输入框里输入文本后点确认按钮，form_value[input_value] 走 fsm.advance。
         if text == _FSM_TASK_OTHER_MARKER:
             return STATE_INPUT_TASK, {
-                "text": "✍️ 请直接输入任务名称（可中文/英文，如「MFF 调试」「路测 03 园区」）",
+                "text": "📝 请在下方输入框输入任务名称：",
+                "card": _input_form_card(
+                    title="✍️ **输入任务名称**\n\n💡 可中文/英文（如「MFF 调试」「路测 03 园区」）",
+                    placeholder="输入任务名称...",
+                    button_text="✅ 确认",
+                    action="fsm_input_task_form",
+                    input_name="task_input",
+                ),
             }
         task = _llm_extract_task(text)["task_name"]
         if not task:
@@ -798,10 +840,17 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
 
     # INPUT_LOCATION：LLM 抽 location
     if current_state == STATE_INPUT_LOCATION:
-        # 2026-06-18 引导性增强：用户点「其它」按钮 → 走自定义输入路径。
+        # 2026-06-18 form UX：用户点「其它」按钮 → 渲染 form+input 卡。
         if text == _FSM_LOCATION_OTHER_MARKER:
             return STATE_INPUT_LOCATION, {
-                "text": "✍️ 请直接输入测试地点（中文/英文均可，如「园区A3 号楼」「上海临港」）",
+                "text": "📍 请在下方输入框输入测试地点：",
+                "card": _input_form_card(
+                    title="✍️ **输入测试地点**\n\n💡 中文/英文均可（如「园区A3 号楼」「上海临港」）",
+                    placeholder="输入测试地点...",
+                    button_text="✅ 确认",
+                    action="fsm_input_location_form",
+                    input_name="location_input",
+                ),
             }
         loc = _llm_extract_location(text)["location"]
         if not loc:

@@ -358,27 +358,45 @@ def test_advance_input_location_saves_and_goes_to_confirm():
 
 # ── INPUT_TASK / INPUT_LOCATION 「其它」按钮路径 ────────────────────────────
 
-def test_advance_input_task_other_renders_text_prompt():
-    """INPUT_TASK 收「其它」marker → 渲染纯文本输入提示（不再展示按钮）。"""
+def test_advance_input_task_other_renders_form_card():
+    """INPUT_TASK 收「其它」marker → 渲染 form+input 卡（Card 2.0）。
+
+    2026-06-18 改：原纯文本提示改为 Card 2.0 form 组件（input + 确认按钮），
+    用户在卡片输入框里输入 + 点确认，form_value 进 fsm.advance。
+    """
     from bot.car_booking_fsm import _FSM_TASK_OTHER_MARKER
     car_state.save("ou_task_other", state="INPUT_TASK", vehicle_no="PNV000",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00")
     new_state, resp = advance("ou_task_other", _FSM_TASK_OTHER_MARKER)
     assert new_state == "INPUT_TASK"  # 保持状态
-    assert "请直接输入任务名称" in resp["text"]
-    # 不展示按钮（避免重复）
-    assert "buttons" not in resp or len(resp.get("buttons", [])) == 0
+    assert "card" in resp  # form 卡
+    card = resp["card"]
+    # Card 2.0 schema + body 包装
+    assert card.get("schema") == "2.0"
+    form = next((e for e in card["body"]["elements"]
+                 if e.get("tag") == "form"), None)
+    assert form is not None, "form 元素必须存在"
+    # form 内含 input + button
+    tags = [e.get("tag") for e in form["elements"]]
+    assert "input" in tags
+    assert "button" in tags
+    # input name 应该是 task_input
+    input_el = next(e for e in form["elements"] if e.get("tag") == "input")
+    assert input_el["name"] == "task_input"
+    # button 的 value.action 是 fsm_input_task_form
+    btn = next(e for e in form["elements"] if e.get("tag") == "button")
+    assert btn["value"]["action"] == "fsm_input_task_form"
     car_state.clear("ou_task_other")
 
 
-def test_advance_input_task_other_then_text_saves():
-    """INPUT_TASK 「其它」之后用户输入文本 → 写 task_name → INPUT_LOCATION。"""
-    from bot.car_booking_fsm import _FSM_TASK_OTHER_MARKER
+def test_advance_input_task_form_submit_saves():
+    """INPUT_TASK form submit（value='我的自定义任务'）→ 写 task_name → INPUT_LOCATION。"""
     car_state.save("ou_task_other2", state="INPUT_TASK", vehicle_no="PNV000",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00")
-    advance("ou_task_other2", _FSM_TASK_OTHER_MARKER)  # 触发「其它」
+    # ws_client 已把 form_value 扁平化 → value['value'] = "我的自定义任务"
+    # card_action_handler 当作普通 text 处理 → fsm.advance("我的自定义任务")
     new_state, resp = advance("ou_task_other2", "我的自定义任务")
     assert new_state == "INPUT_LOCATION"
     pending = car_state.get("ou_task_other2")
@@ -386,8 +404,8 @@ def test_advance_input_task_other_then_text_saves():
     car_state.clear("ou_task_other2")
 
 
-def test_advance_input_location_other_renders_text_prompt():
-    """INPUT_LOCATION 收「其它」marker → 渲染纯文本输入提示。"""
+def test_advance_input_location_other_renders_form_card():
+    """INPUT_LOCATION 收「其它」marker → 渲染 form+input 卡。"""
     from bot.car_booking_fsm import _FSM_LOCATION_OTHER_MARKER
     car_state.save("ou_loc_other", state="INPUT_LOCATION", vehicle_no="PNV000",
                    task_name="MFF调试",
@@ -395,18 +413,25 @@ def test_advance_input_location_other_renders_text_prompt():
                    time_range_end="2026-06-17 16:00")
     new_state, resp = advance("ou_loc_other", _FSM_LOCATION_OTHER_MARKER)
     assert new_state == "INPUT_LOCATION"  # 保持状态
-    assert "请直接输入测试地点" in resp["text"]
+    assert "card" in resp
+    card = resp["card"]
+    assert card.get("schema") == "2.0"
+    form = next((e for e in card["body"]["elements"]
+                 if e.get("tag") == "form"), None)
+    assert form is not None
+    input_el = next(e for e in form["elements"] if e.get("tag") == "input")
+    assert input_el["name"] == "location_input"
+    btn = next(e for e in form["elements"] if e.get("tag") == "button")
+    assert btn["value"]["action"] == "fsm_input_location_form"
     car_state.clear("ou_loc_other")
 
 
-def test_advance_input_location_other_then_text_saves():
-    """INPUT_LOCATION 「其它」之后用户输入文本 → 写 location → CONFIRM。"""
-    from bot.car_booking_fsm import _FSM_LOCATION_OTHER_MARKER
+def test_advance_input_location_form_submit_saves():
+    """INPUT_LOCATION form submit（value='园区A3号楼'）→ 写 location → CONFIRM。"""
     car_state.save("ou_loc_other2", state="INPUT_LOCATION", vehicle_no="PNV000",
                    task_name="MFF调试",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00")
-    advance("ou_loc_other2", _FSM_LOCATION_OTHER_MARKER)
     new_state, resp = advance("ou_loc_other2", "园区A3号楼")
     assert new_state == "CONFIRM"
     pending = car_state.get("ou_loc_other2")
