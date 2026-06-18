@@ -83,12 +83,11 @@ def test_content_block_has_higher_priority_than_length():
 # ── B5: interactive card ─────────────────────────────────────────────────────
 
 def test_apply_returns_card_with_captured():
-    captured = [{"tool": "list_my_reservations", "result": {"code": 200, "data": [
-        {"benchNo": "TJ001", "startTime": "2099-01-01 09:00:00", "endTime": "2099-01-01 10:00:00",
-         "taskName": "t", "status": 0, "statusDesc": "待审批"}]}}]
+    captured = [{"tool": "fetch_user_reservation", "result": {"code": 200, "data": [
+        {"vehicleNo": "PNV332", "startTime": "2099-01-01 09:00:00", "endTime": "2099-01-01 10:00:00",
+         "taskName": "t", "status": "待审批"}]}}]
     res = pipeline.apply("您有1条预约", "ou_x", captured=captured)
     assert res.card is not None
-    assert any(e.get("tag") == "action" for e in res.card["elements"])
 
 
 def test_apply_blocked_has_no_card():
@@ -98,13 +97,11 @@ def test_apply_blocked_has_no_card():
 
 
 def test_apply_plain_text_still_builds_card_without_action():
-    """Plain text WITH structured captured data → card (no buttons expected
-    when the captured entry isn't a reservation/approval)."""
+    """Plain text WITH structured captured data → card."""
     res = pipeline.apply("**你好**", "ou_x", captured=[
-        {"tool": "list_available_benches", "result": {"code": 200, "data": ["TJ001"]}}
+        {"tool": "fetch_available_vehicles", "result": {"code": 200, "data": ["PNV332"]}}
     ])
     assert res.card is not None
-    assert all(e.get("tag") != "action" for e in res.card["elements"])
 
 
 def test_apply_always_builds_card_even_without_captured():

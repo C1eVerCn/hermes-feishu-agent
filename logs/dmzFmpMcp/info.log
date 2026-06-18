@@ -1,0 +1,4 @@
+10:18:42.132 [main] INFO  c.z.DmzFmpMcpService - [logStartupProfileInfo,660] - The following 1 profile is active: "local"
+10:18:42.726 [main] INFO  c.z.DmzFmpMcpService - [logStarted,56] - Started DmzFmpMcpService in 0.938 seconds (process running for 1.296)
+10:23:37.692 [main] INFO  c.z.DmzFmpMcpService - [logStartupProfileInfo,660] - The following 1 profile is active: "local"
+10:23:38.421 [main] INFO  c.z.DmzFmpMcpService - [logStarted,56] - Started DmzFmpMcpService in 1.177 seconds (process running for 1.589)

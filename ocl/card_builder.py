@@ -41,9 +41,8 @@ def _action(buttons: list[dict]) -> dict:
 
 
 def _coerce_result(res):
-    """bench_tools handlers return a JSON string (json.dumps); tool_capture
-    coerces it back to a dict, but the reservation fast path stores the raw
-    string. Accept both shapes — returns a dict, or {} when unparseable."""
+    """工具 handler 返回 JSON 字符串（json.dumps）；tool_capture 解析回 dict。
+    部分代码路径直接传 dict。接受两种形态——返回 dict，无法解析则 {}。"""
     if isinstance(res, dict):
         return res
     if isinstance(res, str):
@@ -61,9 +60,6 @@ def _last_structured(captured: list[dict]):
              + _LIST_BENCH_TOOLS + _LIST_ARCH_TOOLS)
     for entry in reversed(captured):
         res = entry.get("result")
-        # bench_tools/handlers._ok() returns a JSON string (json.dumps the
-        # fmp response). Some tests / code paths pass a dict directly.
-        # Accept both shapes.
         if isinstance(res, str):
             try:
                 res = json.loads(res)

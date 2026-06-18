@@ -146,6 +146,25 @@ def email_of(open_id: str) -> str:
         return ""
 
 
+def mobile_of(open_id: str) -> str:
+    """Stub: 飞书 contact v3 当前不返回 mobile。返回 ""（空字符串即未配置）。
+    2026 Q3 接入飞书 contact v3 mobile 权限后此函数会真返回手机号字符串。"""
+    return ""
+
+
+def build_caller_identity(open_id: str) -> "CallerIdentity":
+    """构造一个 CallerIdentity（openid + email + mobile）。
+
+    email/mobile 解析失败时仍然构造对象（openid 不会空），业务侧 caller.is_authenticated
+    即可判定是否已认证。"""
+    from ocl.tool_guard import CallerIdentity
+    return CallerIdentity(
+        openid=open_id,
+        email=email_of(open_id) if open_id else "",
+        mobile=mobile_of(open_id) or None,
+    )
+
+
 def name_of(open_id: str) -> str:
     if not open_id:
         return ""

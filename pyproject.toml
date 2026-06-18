@@ -14,7 +14,8 @@ dependencies = [
     "python-dotenv>=1.0",
     "pydantic>=2.0",
     "httpx>=0.27",
-    "python-jose[cryptography]>=3.3",
+    "fastmcp>=2.0",  # 车辆预约 MCP server（car_tools/booking_mcp_server.py）
+    "mcp>=1.9",       # FastMCP 依赖
 ]
 
 [project.optional-dependencies]
@@ -25,7 +26,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["feishu", "bot", "infra", "config", "ocl", "hermes_plugins", "bench_tools", "vlm_tools"]
+packages = ["feishu", "bot", "infra", "config", "ocl", "hermes_plugins", "car_tools"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

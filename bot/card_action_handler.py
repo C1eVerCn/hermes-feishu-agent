@@ -20,8 +20,16 @@ from feishu import sender
 
 log = logging.getLogger(__name__)
 
-# fsm_direct_by_id 按钮无 value 字段 —— 用特殊标记符让 FSM 进 DIRECT_BY_ID 状态
-_FSM_DIRECT_BY_ID_MARKER = "__fsm_direct_by_id__"
+# 卡片回调按钮的特殊文本标记（FSM 内部用）—— 无 value / 需特殊翻译
+# 全部集中在这里以便维护；每个 marker 对应 FSM 中的一类按钮
+_FSM_MARKERS = {
+    "fsm_direct_by_id":  "__fsm_direct_by_id__",
+    "fsm_known_yes":     "__fsm_known_yes__",
+    "fsm_known_no":      "__fsm_known_no__",
+    "fsm_dur_minus":     "__fsm_dur_minus__",
+    "fsm_dur_plus":      "__fsm_dur_plus__",
+    "fsm_dur_confirm":   "__fsm_dur_confirm__",
+}
 
 
 def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | None]:
@@ -84,8 +92,8 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     if action == "fsm_pick_slot":
         slot_idx = value.get("slot_idx", 1)
         text = str(slot_idx)
-    elif action == "fsm_direct_by_id":
-        text = _FSM_DIRECT_BY_ID_MARKER
+    elif action in _FSM_MARKERS:
+        text = _FSM_MARKERS[action]
     else:
         text = str(value.get("value", ""))
 

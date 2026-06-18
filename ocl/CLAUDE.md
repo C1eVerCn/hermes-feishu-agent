@@ -8,9 +8,9 @@ before they reach the user. Single entry point: `pipeline.apply(response, user_i
 - `pipeline.py`      — orchestrates all checks; `apply(response, user_id, captured=None) → OclResult`
 - `format_control.py` — strip whitespace, collapse blank lines, detect empty responses
 - `content_filter.py` — keyword/regex hard-blocks (political, key leaks) + warn-only patterns
-- `identity.py`       — open_id → {email, name, role} map; JSON persistence; `set_role` for admins
-- `permission.py`     — role-based tool ACL (`TOOL_MIN_ROLE`); `is_tool_permitted(open_id, tool)`
-- `tool_guard.py`     — thread-local user + email context; `guarded()` wraps handlers (Layer 2 fallback)
+- `identity.py`       — open_id → {email, name, role} map; JSON persistence; `set_role` for admins; `build_caller_identity(openid) → CallerIdentity`
+- `permission.py`     — role-based tool ACL (`TOOL_MIN_ROLE`); `is_tool_permitted(open_id, tool)`（车辆预约域）
+- `tool_guard.py`     — contextvars-based CallerIdentity 注入；`guarded()` wraps handlers (Layer 2 fallback)
 - `length_limiter.py` — truncate at `OCL_MAX_OUTPUT_CHARS`, preserve sentence boundary
 - `session_map.py`    — session_id → user_id mapping for hermes plugin (Layer 1) lookup
 - `tool_capture.py`   — (Plan B) per-session capture of this turn's raw tool results
@@ -24,20 +24,26 @@ returns 0 for non-platform users. OCL gates each tool by a minimum role:
 
 | Min role | Tools |
 |----------|-------|
-| 1 普通用户 | list_architectures, list_available_benches, reserve_bench, cancel_reservation, return_bench, list_my_reservations |
-| 2 调度员   | approve_reservation, list_my_approvals |
-| 3 管理员   | (all of the above; no group restriction at the API layer) |
+| 1 普通用户 | fetch_available_vehicles, _dry_run_vehicle_reservation, _commit_vehicle_reservation, cancel_vehicle_reservation, return_vehicle, fetch_user_reservation, get_user_context, get_common_dictionary |
+| 2 调度员   | approval_vehicle_reservation, fetch_user_approval |
+| 3 管理员   | （以上全部；未来跨组/系统级操作） |
 
 OCL is the **coarse** gate (can this role call this tool). Fine-grained rules
-(same-group, reservation status, time validity) are enforced by the mock API via
-`emailAddress`. The two gates are independent.
+(same-group, reservation status, time validity) are enforced by the MCP server via
+`openid + emailAddress`. The two gates are independent.
 
 ## Identity & role assignment
 
 `data/identity_map.json` is gitignored (see `.example`). Admins assign roles in Feishu
 with `设置角色 <open_id> <1|2|3>` → `identity.set_role`. No self-service application flow.
-`emailAddress` for every API call is injected from the current user's open_id via
-`tool_guard.set_current_email`; it is never an LLM-facing tool argument.
+`emailAddress` for every MCP call is injected from the current user's open_id via
+`tool_guard.set_current_caller(CallerIdentity(...))`; it is never an LLM-facing tool argument.
+
+**CallerIdentity**（2026-06-16 业务域合并新增）：
+- 单个 contextvars 变量（替代旧的 set_current_user + set_current_email 两个）
+- 字段：openid / email / mobile（mobile 当前 stub 为 None，2026 Q3 接入）
+- `as_dict()` 输出 MCP 入参（camelCase）：`{"openId":..., "emailAddress":..., "mobile":...}`
+- 旧 API（set_current_user / set_current_email）保留为 alias（不破坏现有调用方）
 
 ## Tool boundary wiring (double defense)
 
@@ -50,10 +56,10 @@ The same plugin also registers a `post_tool_call` hook (Plan B) that records eac
 raw tool result into `tool_capture` for deterministic card rendering.
 
 **Layer 2 — guarded() wrapper (fallback):**  
-`mock_tools/register.py` wraps every handler with `tool_guard.guarded(name, handler)`.
-`bot/handler.py` calls `set_current_user(user_id)` + `set_current_email(email)` before
-`agent.chat()` and clears them in `finally`. Handlers check permission via thread-local
-inside `guarded()` and read the injected email.
+`car_tools/register.py` wraps every handler with `tool_guard.guarded(name, handler)`.
+`bot/handler.py` calls `set_current_caller(CallerIdentity(openid, email))` before
+`agent.chat()` and clears them in `finally`. Handlers check permission via contextvar
+inside `guarded()` and read the injected email via `get_current_caller()`.
 
 **Layer 1 blocks before Layer 2 runs.** Layer 2 activates only when Layer 1 fails
 (plugin not loaded, session_map miss, permission check exception).
@@ -64,7 +70,7 @@ inside `guarded()` and read the injected email.
   (card_builder is pure CPU, satisfies this)
 - `apply()` never raises — exceptions are caught and logged; fail-open (pass through)
 - Never log response content — only `user_id`, `block_reason` (string key), and lengths
-- Thread-safe: `tool_guard` uses `threading.local`; `tool_capture`/`session_map`/`identity` use locks
+- Thread-safe: `tool_guard` uses `contextvars.ContextVar`; `tool_capture`/`session_map`/`identity` use locks
 
 ## What NOT to do
 
@@ -72,4 +78,4 @@ inside `guarded()` and read the injected email.
 - Do not add role persistence beyond the JSON files (no DB, no Redis)
 - Do not summarise truncated responses — truncate + note only
 - Do not add permission enforcement to pipeline.py — it happens at tool invocation time
-- Do not let `emailAddress` become an LLM-facing tool argument — always inject it
+- Do not let `emailAddress` / `openId` / `mobile` become LLM-facing tool arguments — always inject via CallerIdentity

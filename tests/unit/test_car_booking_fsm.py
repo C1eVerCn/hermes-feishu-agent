@@ -117,11 +117,12 @@ class _FakeMcpWithCars:
 
 
 def test_advance_select_from_list_returns_table(monkeypatch):
-    """SELECT_FROM_LIST 查车 → 表格卡 + 缓存 last_vehicles 到 car_state。"""
+    """SELECT_FROM_LIST 查车 → 表格卡 + 缓存 last_vehicles 到 car_state。
+    新流程：SELECT_DURATION 收到「确认」且 vehicle_no 空 → 查车 → SELECT_FROM_LIST。"""
     monkeypatch.setattr(_mc, "_client", _FakeMcpWithCars())
     car_state.save("ou_t3", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=60)
-    new_state, resp = advance("ou_t3", "")
+    new_state, resp = advance("ou_t3", "__fsm_dur_confirm__")
     assert new_state == "SELECT_FROM_LIST"
     assert "card" in resp
     pending = car_state.get("ou_t3")
@@ -140,7 +141,7 @@ def test_advance_select_from_list_no_cars(monkeypatch):
     monkeypatch.setattr(_mc, "_client", _Empty())
     car_state.save("ou_t3b", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=60)
-    new_state, resp = advance("ou_t3b", "")
+    new_state, resp = advance("ou_t3b", "__fsm_dur_confirm__")
     assert new_state == "SELECT_FROM_LIST"
     pending = car_state.get("ou_t3b")
     assert pending.last_vehicles == []
@@ -158,7 +159,7 @@ def test_advance_select_from_list_fetch_error(monkeypatch):
     monkeypatch.setattr(_mc, "_client", _Fail())
     car_state.save("ou_t3c", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
                    duration_minutes=60)
-    new_state, resp = advance("ou_t3c", "")
+    new_state, resp = advance("ou_t3c", "__fsm_dur_confirm__")
     assert new_state == "SELECT_FROM_LIST"
     pending = car_state.get("ou_t3c")
     assert pending.last_vehicles == []
@@ -238,11 +239,12 @@ def test_advance_select_time_to_input_task():
 # ── DIRECT_BY_ID state ────────────────────────────────────────────────────
 
 def test_advance_direct_by_id_valid_format():
-    """DIRECT_BY_ID 收有效编号 → SELECT_DURATION。"""
+    """DIRECT_BY_ID 收有效编号 → SELECT_DURATION（带 duration_card）。"""
     car_state.save("ou_t9", state="DIRECT_BY_ID")
     new_state, resp = advance("ou_t9", "SNV018")
     assert new_state == "SELECT_DURATION"
-    assert "SNV018" in resp["text"]
+    # 新版渲染 duration_card（不是 text+buttons）
+    assert "card" in resp
     pending = car_state.get("ou_t9")
     assert pending.vehicle_no == "SNV018"
     car_state.clear("ou_t9")

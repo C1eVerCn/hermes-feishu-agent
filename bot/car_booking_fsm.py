@@ -48,43 +48,106 @@ ALL_STATES = frozenset({
 VEHICLE_TYPE_BUTTONS = ["DM2", "CT1", "大F车", "CM0", "BM2"]
 CHIP_BUTTONS = ["Xavier", "ADCU", "Orin", "Thor"]
 ENTRY_MODE_BUTTONS = ["已知编号", "帮我查"]
-DURATION_BUTTONS = ["30分钟", "1小时", "2小时", "3小时", "半天", "1天", "其它"]
 TASK_HINT_BUTTONS = ["MFF调试", "路测", "数据采集"]
 LOCATION_BUTTONS = ["上海", "北京", "广州", "深圳"]
 
 # 时段候选上限（spec §5.2）
 MAX_SLOT_CANDIDATES = 3
-# 单次预约时长上限（spec §5.4）= 8h
-MAX_DURATION_MINUTES = 480
+# 单次预约时长（spec §5.4）= 8h 上限，30min 步进
+MIN_DURATION_MINUTES = 30
+DURATION_STEP_MINUTES = 30
+MAX_DURATION_MINUTES = 480  # 8h
+DEFAULT_DURATION_MINUTES = 30  # 初始 30 分钟
+
+# 卡片回调按钮的特殊文本标记（card_action_handler._handle_fsm_button 用）
+_FSM_DIRECT_BY_ID_MARKER = "__fsm_direct_by_id__"
+_FSM_DUR_MINUS_MARKER = "__fsm_dur_minus__"
+_FSM_DUR_PLUS_MARKER = "__fsm_dur_plus__"
+_FSM_DUR_CONFIRM_MARKER = "__fsm_dur_confirm__"
+_FSM_KNOWN_YES_MARKER = "__fsm_known_yes__"
+_FSM_KNOWN_NO_MARKER = "__fsm_known_no__"
+
+
+def _format_duration(minutes: int) -> str:
+    """分钟数 → 'X 小时 Y 分钟' 友好显示。"""
+    if minutes < 60:
+        return f"{minutes} 分钟"
+    h, m = divmod(minutes, 60)
+    return f"{h} 小时" + (f" {m} 分钟" if m else "")
 
 
 def _entry_card() -> dict:
-    """START 状态：入口卡。"""
+    """START 状态：入口卡。问"您是否知道要约的车辆编号？"，[知道] [不知道] 二选一。"""
     return {
         "card": {
             "config": {"wide_screen_mode": True},
             "elements": [
                 {"tag": "div", "text": {"tag": "lark_md",
-                 "content": "**🚗 车辆预约**\n请选择您要预约的车型，或直接输入车辆编号："}},
+                 "content": "**🚗 车辆预约**\n您是否知道要预约的车辆编号？"}},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "type": "primary",
+                     "text": {"tag": "plain_text", "content": "知道"},
+                     "value": {"action": "fsm_known_yes"}},
+                    {"tag": "button", "type": "default",
+                     "text": {"tag": "plain_text", "content": "不知道"},
+                     "value": {"action": "fsm_known_no"}},
+                ]}
+            ]
+        }
+    }
+
+
+def _type_card() -> dict:
+    """SELECT_VEHICLE_TYPE：5 车型按钮（用户点了"不知道"后展示）。"""
+    return {
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md",
+                 "content": "**🚗 车辆预约**\n请选择车型："}},
                 {"tag": "action", "actions": [
                     {"tag": "button", "type": "primary",
                      "text": {"tag": "plain_text", "content": t},
                      "value": {"action": "fsm_select", "value": t}}
                     for t in VEHICLE_TYPE_BUTTONS
-                ] + [{"tag": "button", "type": "default",
-                       "text": {"tag": "plain_text", "content": "直接输入编号"},
-                       "value": {"action": "fsm_direct_by_id"}}]}
+                ]}
+            ]
+        }
+    }
+
+
+def _duration_card(pending) -> dict:
+    """SELECT_DURATION：当前时长显示 + [-30] [+30] [确认] 按钮。"""
+    cur = pending.duration_minutes if pending and pending.duration_minutes > 0 else DEFAULT_DURATION_MINUTES
+    can_minus = cur > MIN_DURATION_MINUTES
+    can_plus = cur < MAX_DURATION_MINUTES
+    return {
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md",
+                 "content": f"**⏱️ 用车时长**\n\n当前：**{_format_duration(cur)}**\n\n"
+                            f"（范围：{_format_duration(MIN_DURATION_MINUTES)} ~ "
+                            f"{_format_duration(MAX_DURATION_MINUTES)}，"
+                            f"步进 {DURATION_STEP_MINUTES} 分钟）"}},
+                {"tag": "action", "actions": [
+                    {"tag": "button", "type": "default",
+                     "text": {"tag": "plain_text", "content": "−30 分钟"},
+                     "value": {"action": "fsm_dur_minus"}},
+                    {"tag": "button", "type": "default",
+                     "text": {"tag": "plain_text", "content": "+30 分钟"},
+                     "value": {"action": "fsm_dur_plus"}},
+                    {"tag": "button", "type": "primary",
+                     "text": {"tag": "plain_text", "content": "确认"},
+                     "value": {"action": "fsm_dur_confirm"}},
+                ]}
             ]
         }
     }
 
 
 def _single_chip(vehicle_type: str) -> str | None:
-    """单芯片车型直接跳 VEHICLE_ENTRY（spec §3.3）；多芯片进 CONFIRM_CHIP。
-
-    Returns: chip 名（单芯片时）或 None（多芯片需用户选）。
-    实际 chip 映射在生产环境应来自后端（getCommonDictionary），此处硬编码示例。
-    """
+    """单芯片车型（保留备用，不再主流程用）。"""
     single_chip_map = {"DM2": "Xavier", "CT1": "Orin", "CM0": "Thor", "BM2": "ADCU"}
     return single_chip_map.get(vehicle_type)
 
@@ -226,28 +289,28 @@ def advance(user_id: str, text: str = "") -> tuple[str, dict]:
 def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tuple[str, dict]:
     """内部 advance 逻辑：返回 (new_state, response)。不持久化 state。"""
 
-    # 入口状态：未开始 → 渲染入口卡（但若用户直接报编号，跳 DIRECT_BY_ID）
+    # 入口状态：未开始 → 渲染"知道编号吗"问询卡
     if current_state == STATE_START:
-        # 优先识别"报编号"快捷路径（spec §3.3 START 行）
+        # 优先识别"报编号"快捷路径（用户在 START 直接报编号）
         if text and _VEHICLE_NO_RE.match(text.strip().upper()):
             car_state.save(user_id, vehicle_no=text.strip().upper())
-            return STATE_SELECT_DURATION, {
-                "text": f"已选 {text.strip().upper()}。请选择用车的时长：",
-                "buttons": [{"text": t, "value": {"action": "fsm_select_duration", "value": t}}
-                            for t in DURATION_BUTTONS]
+            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
+        # 收到"知道"按钮回调 → DIRECT_BY_ID
+        if text == _FSM_KNOWN_YES_MARKER:
+            return STATE_DIRECT_BY_ID, {
+                "text": "请输入车辆编号（如 SNV018 / PNV000）：",
             }
+        # 收到"不知道"按钮回调 → 展示车型卡
+        if text == _FSM_KNOWN_NO_MARKER:
+            return STATE_SELECT_VEHICLE_TYPE, _type_card()
+        # 默认：渲染问询卡
         return STATE_SELECT_VEHICLE_TYPE, _entry_card()
 
-    # SELECT_VEHICLE_TYPE：收车型按钮或 LLM 抽取的车型
+    # SELECT_VEHICLE_TYPE：收车型按钮（用户从"不知道"路径过来）
     if current_state == STATE_SELECT_VEHICLE_TYPE:
-        # 卡片回调：用户点"直接输入编号"按钮（无 value，用特殊标记符）
-        if text == "__fsm_direct_by_id__":
-            return STATE_DIRECT_BY_ID, {
-                "text": "请直接输入车辆编号（如 SNV018）：",
-            }
         if text in VEHICLE_TYPE_BUTTONS:
             car_state.save(user_id, vehicle_type=text)
-            # 统一过 CONFIRM_CHIP（即使单芯片车型也确认一次，避免"自动带上芯片"的歧义）
+            # 统一过 CONFIRM_CHIP（避免"自动带上芯片"的歧义）
             return STATE_CONFIRM_CHIP, {
                 "text": f"已选车型 {text}。请选择芯片平台：",
                 "buttons": [{"text": t, "value": {"action": "fsm_select_chip", "value": t}}
@@ -256,26 +319,25 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         return STATE_SELECT_VEHICLE_TYPE, {
             "text": f"未识别车型「{text}」。请从按钮选择：",
             "buttons": [{"text": t, "value": {"action": "fsm_select_type", "value": t}}
-                       for t in VEHICLE_TYPE_BUTTONS]
+                        for t in VEHICLE_TYPE_BUTTONS]
         }
 
-    # CONFIRM_CHIP：收芯片按钮
+    # CONFIRM_CHIP：收芯片按钮 → 直接进 SELECT_DURATION（车型+芯片+时长都明确后才查车）
     if current_state == STATE_CONFIRM_CHIP:
         chip = text.strip()
         if chip in CHIP_BUTTONS:
             car_state.save(user_id, chip=chip)
-            return STATE_VEHICLE_ENTRY, {
-                "text": f"已选芯片 {chip}。请选择查车方式：",
-                "buttons": [{"text": t, "value": {"action": "fsm_entry", "value": t}}
-                           for t in ENTRY_MODE_BUTTONS]
-            }
+            pending_now = car_state.get(user_id)
+            if not pending_now.duration_minutes:
+                car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
+            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
         return STATE_CONFIRM_CHIP, {
             "text": f"未识别芯片「{text}」。请从按钮选择：",
             "buttons": [{"text": t, "value": {"action": "fsm_select_chip", "value": t}}
-                       for t in CHIP_BUTTONS]
+                        for t in CHIP_BUTTONS]
         }
 
-    # VEHICLE_ENTRY：选"已知编号" / "帮我查"
+    # VEHICLE_ENTRY：保留兼容（不在主流程用）。收"已知编号"或"帮我查"。
     if current_state == STATE_VEHICLE_ENTRY:
         text_clean = text.strip()
         if text_clean == "已知编号":
@@ -283,43 +345,41 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                 "text": "请直接输入车辆编号（如 SNV018）：",
             }
         if text_clean == "帮我查":
-            return STATE_SELECT_DURATION, {
-                "text": "请选择您需要用车的时长：",
-                "buttons": [{"text": t, "value": {"action": "fsm_select_duration", "value": t}}
-                           for t in DURATION_BUTTONS]
-            }
+            pending_now = car_state.get(user_id)
+            if not pending_now.duration_minutes:
+                car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
+            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
         return STATE_VEHICLE_ENTRY, {
             "text": "请选择查车方式：",
             "buttons": [{"text": t, "value": {"action": "fsm_entry", "value": t}}
-                           for t in ENTRY_MODE_BUTTONS]
+                        for t in ENTRY_MODE_BUTTONS]
         }
 
-    # SELECT_DURATION：选时长按钮 → 直接串联 SELECT_FROM_LIST（单次 advance 完成查车）
+    # SELECT_DURATION：±30min 按钮选择器（30~480 min，30 步进）
     if current_state == STATE_SELECT_DURATION:
-        # 6 个固定时长 → 30/60/120/180/240/480 分钟。"其它" 不在 mapping 中：
-        # PR5 会决定 custom-duration 流程（可能走自由文本输入）。
-        mapping = {"30分钟": 30, "1小时": 60, "2小时": 120,
-                   "3小时": 180, "半天": 240, "1天": 480}
-        if text in mapping:
-            car_state.save(user_id, duration_minutes=mapping[text])
-        elif not text:
-            # re-entry: state 已是 SELECT_DURATION + duration_minutes 已存
-            if (pending and pending.duration_minutes > 0):
-                pass  # fall through 到 SELECT_FROM_LIST
-            else:
-                return STATE_SELECT_DURATION, {
-                    "text": "请先选择用车时长：",
-                    "buttons": [{"text": t, "value": {"action": "fsm_select_duration", "value": t}}
-                                for t in DURATION_BUTTONS]
+        cur = (pending.duration_minutes if pending and pending.duration_minutes > 0
+               else DEFAULT_DURATION_MINUTES)
+        if text == _FSM_DUR_MINUS_MARKER:
+            new_dur = max(MIN_DURATION_MINUTES, cur - DURATION_STEP_MINUTES)
+            car_state.save(user_id, duration_minutes=new_dur)
+            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
+        if text == _FSM_DUR_PLUS_MARKER:
+            new_dur = min(MAX_DURATION_MINUTES, cur + DURATION_STEP_MINUTES)
+            car_state.save(user_id, duration_minutes=new_dur)
+            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
+        if text == _FSM_DUR_CONFIRM_MARKER:
+            # 已选时长 → 根据是否已选车辆决定下一态
+            # 已知编号路径（vehicle_no 已存）→ 直接进 DURATION_CONFIRM 走时段匹配
+            # 不知道路径（vehicle_no 空）→ fall through 到 SELECT_FROM_LIST 查车
+            if pending and pending.vehicle_no:
+                return STATE_DURATION_CONFIRM, {
+                    "text": f"已选 {pending.vehicle_no}，时长 {cur} 分钟。正在匹配可用时段…",
                 }
+            # fall through 到下面的 SELECT_FROM_LIST
+            current_state = STATE_SELECT_FROM_LIST
         else:
-            return STATE_SELECT_DURATION, {
-                "text": f"未识别时长「{text}」。请从按钮选择：",
-                "buttons": [{"text": t, "value": {"action": "fsm_select_duration", "value": t}}
-                            for t in DURATION_BUTTONS]
-            }
-        # 落到 SELECT_FROM_LIST 处理
-        current_state = STATE_SELECT_FROM_LIST
+            # 任何其他文本（包括 re-entry）→ 重渲染 duration_card
+            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
 
     # SELECT_FROM_LIST：调 fetch_available_vehicles → 渲染表格 + 缓存 last_vehicles
     if current_state == STATE_SELECT_FROM_LIST:
@@ -449,11 +509,10 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                 "text": f"编号格式不符「{vehicle_no}」，应为字母+数字（如 SNV018 / PNV000）。请重输：",
             }
         car_state.save(user_id, vehicle_no=vehicle_no)
-        return STATE_SELECT_DURATION, {
-            "text": f"已选 {vehicle_no}。请选择用车的时长：",
-            "buttons": [{"text": t, "value": {"action": "fsm_select_duration", "value": t}}
-                        for t in DURATION_BUTTONS]
-        }
+        pending_now = car_state.get(user_id)
+        if not pending_now.duration_minutes:
+            car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
+        return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
 
     # INPUT_TASK：LLM 抽 taskName（spec §3.4 ④；spec §4.2 prompt 不补全）
     if current_state == STATE_INPUT_TASK:

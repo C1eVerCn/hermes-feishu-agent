@@ -6,13 +6,13 @@ import ocl.tool_capture as tc
 def test_post_tool_call_records_into_capture():
     tc.clear("feishu_ou_x")
     acl._on_post_tool_call(
-        tool_name="list_my_reservations",
+        tool_name="fetch_user_reservation",
         args={}, result='{"code":200,"data":[]}',
         session_id="feishu_ou_x", tool_call_id="c1",
     )
     items = tc.read("feishu_ou_x")
     assert len(items) == 1
-    assert items[0]["tool"] == "list_my_reservations"
+    assert items[0]["tool"] == "fetch_user_reservation"
     assert items[0]["result"]["code"] == 200
 
 

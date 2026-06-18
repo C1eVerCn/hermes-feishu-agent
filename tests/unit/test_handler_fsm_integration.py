@@ -104,7 +104,7 @@ def test_in_pending_state_continues_fsm(setup):
 
 
 def test_select_vehicle_type_chip_confirm_chains_to_entry(setup):
-    """车型 + 芯片 + 查车方式 一路走下来。"""
+    """车型 + 芯片 + 时长 一路走下来（新流程：直接进 SELECT_DURATION，无 VEHICLE_ENTRY）。"""
     # 选车型（大F车 → 多芯片）
     car_state.save("ou_int", state="SELECT_VEHICLE_TYPE")
     handler._handle(_event("大F车", "m2"))
@@ -113,15 +113,16 @@ def test_select_vehicle_type_chip_confirm_chains_to_entry(setup):
     # 选芯片
     handler._handle(_event("Xavier", "m3"))
     pending = car_state.get("ou_int")
-    assert pending.state == "VEHICLE_ENTRY"
-    # 选"帮我查"
-    handler._handle(_event("帮我查", "m4"))
-    pending = car_state.get("ou_int")
+    # 新流程：芯片确认后直接进 SELECT_DURATION（不再经过 VEHICLE_ENTRY）
     assert pending.state == "SELECT_DURATION"
-    # 选时长 1小时
-    handler._handle(_event("1小时", "m5"))
+    assert pending.duration_minutes == 30  # 默认
+    # 点 +30 → 60
+    handler._handle(_event("__fsm_dur_plus__", "m5"))
     pending = car_state.get("ou_int")
-    # SELECT_DURATION + 时长按钮 → SELECT_FROM_LIST（已 fetch）
+    assert pending.duration_minutes == 60
+    # 点 确认 → SELECT_FROM_LIST（查车）
+    handler._handle(_event("__fsm_dur_confirm__", "m6"))
+    pending = car_state.get("ou_int")
     assert pending.state == "SELECT_FROM_LIST"
     assert len(pending.last_vehicles) == 3
 

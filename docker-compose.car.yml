@@ -1,0 +1,53 @@
+# docker-compose.car.yml — dmz-CarBooking bot 容器
+# 用法：
+#   docker compose -f docker-compose.car.yml up -d --build
+#   docker compose -f docker-compose.car.yml logs -f
+#   docker compose -f docker-compose.car.yml down
+#
+# 前置：上游 fmp 车辆预约后端在跑（/Users/chris/Downloads/dmz-fmp-mcp-dev-260409
+#       启动后会注册到 docker 的 fmp-net 网络；本 compose 把 bot 接入同网络）。
+#
+# 端口：
+#   - 8088 host 端暴露（/health 检查用）
+#   - bot 容器内调上游 fmp 通过 car-booking-mcp:9015
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.car
+    image: dmz-car-booking:dev
+    container_name: dmz-CarBooking
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 上游 fmp 车辆预约后端地址（容器内用 docker 服务名）
+      CAR_API_BASE_URL: http://car-booking-mcp:9015
+      CAR_API_PREFIX: /fmp/vehicleReservation
+    volumes:
+      # 整个项目源码挂载——避免每次改代码都要重建 image
+      - ./:/app
+      # data/ 显式声明：identity_map.json 持久化
+      - ./data:/app/data
+    # 公网 DNS 配在 docker DNS 之前（docker DNS 只能解析 fmp-net 内的服务名，
+    # 公网域名如 open.feishu.cn 必须走公网 DNS）
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+      - 127.0.0.11
+    networks:
+      - fmp-net
+    ports:
+      - "8088:8088"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8088/health', timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+networks:
+  # 接入已有的 fmp-net（不是新建网络）
+  fmp-net:
+    external: true
+    name: docker_fmp-net

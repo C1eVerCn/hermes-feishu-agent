@@ -43,6 +43,9 @@ _SENSITIVE_KEYS = {
 # 从用户消息中提取偏好（轻量关键词匹配）
 _ARCH_PATTERN = re.compile(r"([1-4]\.\d架构|L[1-4]架构|架构类型)")
 _BENCH_PATTERN = re.compile(r"(TJ\d{3})")
+_VEHICLE_PATTERN = re.compile(r"((?:PNV|SVV|SOV|PNV|CT|JH|DH)\d{2,6})")
+_PLATFORM_PATTERN = re.compile(r"(Xavier|ADCU|Orin|Thor)")
+_VEHICLE_TYPE_PATTERN = re.compile(r"(DM2|CT1|大F车|CM0|BM2)")
 _EVENT_PATTERN = re.compile(r"(hotupdate_filter_[\w_]+)")
 
 
@@ -75,6 +78,15 @@ def _extract_preferences(text):
  benches = _BENCH_PATTERN.findall(text)
  if benches:
   prefs["benches_mentioned"] = list(set(benches))
+ vehicles = _VEHICLE_PATTERN.findall(text)
+ if vehicles:
+  prefs["vehicles_mentioned"] = list(set(vehicles))
+ platforms = _PLATFORM_PATTERN.findall(text)
+ if platforms:
+  prefs["platforms_mentioned"] = list(set(platforms))
+ vts = _VEHICLE_TYPE_PATTERN.findall(text)
+ if vts:
+  prefs["vehicle_types_mentioned"] = list(set(vts))
  events = _EVENT_PATTERN.findall(text)
  if events:
   prefs["event_names_mentioned"] = list(set(events))
@@ -148,6 +160,9 @@ class DMZMemoryProvider(MemoryProvider):
    return self._prefetch_cache
   arch_hits = _ARCH_PATTERN.findall(query)
   bench_hits = _BENCH_PATTERN.findall(query)
+  vehicle_hits = _VEHICLE_PATTERN.findall(query)
+  platform_hits = _PLATFORM_PATTERN.findall(query)
+  vt_hits = _VEHICLE_TYPE_PATTERN.findall(query)
   event_hits = _EVENT_PATTERN.findall(query)
   lines = []
   prefs = self._mem.get("preferences", {})
@@ -155,6 +170,12 @@ class DMZMemoryProvider(MemoryProvider):
    lines.append("用户常查询的架构类型：" + str(prefs.get("architectures_mentioned")))
   if bench_hits and prefs.get("benches_mentioned"):
    lines.append("用户常查询的台架：" + str(prefs.get("benches_mentioned")))
+  if vehicle_hits and prefs.get("vehicles_mentioned"):
+   lines.append("用户常查询的车辆：" + str(prefs.get("vehicles_mentioned")))
+  if platform_hits and prefs.get("platforms_mentioned"):
+   lines.append("用户常查询的芯片平台：" + str(prefs.get("platforms_mentioned")))
+  if vt_hits and prefs.get("vehicle_types_mentioned"):
+   lines.append("用户常查询的车辆类型：" + str(prefs.get("vehicle_types_mentioned")))
   if event_hits and prefs.get("event_names_mentioned"):
    lines.append("用户常查询的VLM场景：" + str(prefs.get("event_names_mentioned")))
   recents = self._mem.get("recent_actions", [])[-3:]

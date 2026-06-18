@@ -94,27 +94,27 @@ def test_strips_hallucinated_tool_call_json_tool_form():
     """When enabled_toolsets is misconfigured, LLM falls back to text-mode
     'function call' syntax. Must be stripped, not passed to the user."""
     text = (
-        "查询台架架构\n"
-        '{"tool": "list_architectures", "parameters": {}}\n'
-        "查询可用台架"
+        "查询车辆\n"
+        '{"tool": "fetch_available_vehicles", "parameters": {}}\n'
+        "查询可用车辆"
     )
     result = fc.apply(text)
     assert '"tool"' not in result.text
-    assert "list_architectures" not in result.text
-    assert "查询台架架构" in result.text
-    assert "查询可用台架" in result.text
+    assert "fetch_available_vehicles" not in result.text
+    assert "查询车辆" in result.text
+    assert "查询可用车辆" in result.text
 
 
 def test_strips_hallucinated_tool_call_json_name_form():
     """OpenAI-style name/arguments variant."""
     text = (
         '好的，我来查。\n'
-        '{"name": "list_available_benches", "arguments": {}}\n'
+        '{"name": "fetch_available_vehicles", "arguments": {}}\n'
         "请稍等"
     )
     result = fc.apply(text)
     assert '"name"' not in result.text
-    assert "list_available_benches" not in result.text
+    assert "fetch_available_vehicles" not in result.text
     assert "好的，我来查。" in result.text
     assert "请稍等" in result.text
 
@@ -123,17 +123,17 @@ def test_strips_multiline_pretty_printed_tool_json():
     """LLM often emits pretty-printed multi-line JSON when hallucinating tools.
     Must strip the whole block (all 4 lines), not just the opener line."""
     text = (
-        "查询台架架构\n"
+        "查询车辆\n"
         "{\n"
-        '  "tool": "list_available_benches",\n'
+        '  "tool": "fetch_available_vehicles",\n'
         '  "parameters": {}\n'
         "}\n"
         "请稍等"
     )
     result = fc.apply(text)
     assert '"tool"' not in result.text
-    assert "list_available_benches" not in result.text
-    assert "查询台架架构" in result.text
+    assert "fetch_available_vehicles" not in result.text
+    assert "查询车辆" in result.text
     assert "请稍等" in result.text
     # Whole JSON block (4 lines) gone, only 2 natural-language lines remain
     assert result.text.count("\n") <= 2

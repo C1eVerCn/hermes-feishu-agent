@@ -1,4 +1,4 @@
-"""Tests for ocl.intent_filter — OCL pipeline 的闲聊脱敏闸。"""
+"""Tests for ocl.intent_filter — OCL pipeline 的闲聊脱敏闸（车辆预约域）。"""
 from ocl import intent_filter
 
 
@@ -27,15 +27,15 @@ def test_poem_request_is_redirected():
 
 
 def test_business_answer_with_marker_word_is_not_redirected():
-    """「台架」和「天气」同时出现（不可能但保证安全）→ 领域词胜出，不拦截。"""
-    r = intent_filter.check("TJ001 台架今天天气情况")
-    # 含领域词「台架」「TJ001」 → 透传
+    """「车辆」和「天气」同时出现 → 领域词胜出，不拦截。"""
+    r = intent_filter.check("PNV332 车辆今天天气情况")
+    # 含领域词「车辆」「PNV332」 → 透传
     assert r.redirected is False
 
 
 def test_pure_business_answer_not_redirected():
     """纯业务回复即使没命中闲聊标记也透传。"""
-    r = intent_filter.check("当前可用台架有 TJ001 / TJ002。")
+    r = intent_filter.check("当前可用车辆有 PNV332 / SVV027。")
     assert r.redirected is False
 
 
@@ -47,7 +47,7 @@ def test_response_with_only_chitchat_marker_redirected():
 
 def test_approval_business_response_with_status_words_not_redirected():
     """业务回复常见字段：时间、状态、审批 → 不应触发。"""
-    r = intent_filter.check("您有 1 条预约待审批，开始时间是 2026-07-01 09:00:00。")
+    r = intent_filter.check("您有 1 条预约待审批，开始时间是 2026-07-01 09:00。")
     assert r.redirected is False
 
 
@@ -65,13 +65,13 @@ def test_empty_response_not_redirected():
 def test_redirect_message_is_human_friendly():
     """引导话术必须包含可办事项 + 可复制例句（用户要求「引导到正常流程」）。"""
     msg = intent_filter.REDIRECT_MESSAGE
-    assert "台架" in msg and "VLM" in msg
+    assert "车辆" in msg and "预约" in msg
     assert "查询" in msg and "预约" in msg
     # 至少一个可复制的例句（以「预约」开头）
     assert "预约" in msg
 
 
 def test_no_llm_self_reference_redirects():
-    """LLM 自报「我是一个AI」之类不算闲聊，业务无关键词时仍放行（避免与 content_filter 重复）。"""
+    """LLM 自报「我是一个AI」之类不算闲聊，业务无关键词时仍放行。"""
     r = intent_filter.check("好的，明白了。")
     assert r.redirected is False

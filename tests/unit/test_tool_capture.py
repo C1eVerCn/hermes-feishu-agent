@@ -4,11 +4,11 @@ import ocl.tool_capture as tc
 
 def test_record_then_read_in_order():
     tc.clear("s1")
-    tc.record("s1", "list_my_reservations", {"code": 200, "data": [{"benchNo": "TJ001"}]})
-    tc.record("s1", "list_architectures", {"code": 200, "data": ["1.0架构"]})
+    tc.record("s1", "fetch_user_reservation", {"code": 200, "data": [{"vehicleNo": "PNV332"}]})
+    tc.record("s1", "fetch_available_vehicles", {"code": 200, "data": ["PNV332"]})
     items = tc.read("s1")
-    assert [i["tool"] for i in items] == ["list_my_reservations", "list_architectures"]
-    assert items[0]["result"]["data"][0]["benchNo"] == "TJ001"
+    assert [i["tool"] for i in items] == ["fetch_user_reservation", "fetch_available_vehicles"]
+    assert items[0]["result"]["data"][0]["vehicleNo"] == "PNV332"
 
 
 def test_sessions_isolated():

@@ -31,8 +31,11 @@ class Settings:
     AGENT_TIMEOUT_SECONDS: int = field(default_factory=lambda: int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")))
     AGENT_POOL_MAX_SIZE: int = field(default_factory=lambda: int(os.getenv("AGENT_POOL_MAX_SIZE", "100")))
 
-    BENCH_API_BASE_URL: str = field(default_factory=lambda: _optional("BENCH_API_BASE_URL", "http://localhost:9013"))
-    VLM_API_BASE_URL: str = field(default_factory=lambda: _optional("VLM_API_BASE_URL", "http://localhost:9014"))
+    # ── MCP server（车辆预约业务，spawn stdio 子进程）─────────────────────────
+    # 对齐参考项目：~/.hermes/config.yaml::mcp_servers::car_booking 指向
+    # car_tools.booking_mcp_server.py（FastMCP stdio server）。
+    # CAR_MCP_SERVER_NAME 是该 dict 的 key（用于日志）。
+    CAR_MCP_SERVER_NAME: str = field(default_factory=lambda: _optional("CAR_MCP_SERVER_NAME", "car_booking"))
 
     HTTP_PORT: int = field(default_factory=lambda: int(os.getenv("HTTP_PORT", "8088")))
     LOG_LEVEL: str = field(default_factory=lambda: _optional("LOG_LEVEL", "INFO"))

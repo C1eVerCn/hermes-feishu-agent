@@ -88,13 +88,11 @@ def test_eviction_handles_missing_session_id(monkeypatch):
 # ── enabled_toolsets alignment (added 2026-06-09 — bug fix) ────────────────
 
 def test_enabled_toolsets_match_registered_toolsets(monkeypatch):
-    """Regression: 'testbench' was hardcoded but no toolset was registered with
-    that name → LLM had zero tools → hallucinated JSON in text responses.
-    Ensure enabled_toolsets overlaps with at least one registered toolset."""
+    """Regression: ensure enabled_toolsets overlaps with at least one registered
+    toolset (车辆预约域: 'car'). 2026-06-16 业务域合并后唯一 toolset 是 car。"""
     from bot.agent_pool import AgentPool
     from tools.registry import registry
-    import bench_tools.register  # noqa: F401 — side-effect registration
-    import vlm_tools.register    # noqa: F401
+    import car_tools.register  # noqa: F401 — side-effect registration
 
     with patch("bot.agent_pool.AIAgent", side_effect=_mock_agent) as mock_agent_cls:
         pool = AgentPool(max_size=10)
@@ -106,8 +104,8 @@ def test_enabled_toolsets_match_registered_toolsets(monkeypatch):
             f"enabled_toolsets={enabled} has no overlap with "
             f"registered toolsets={sorted(registered)} — LLM will hallucinate tools"
         )
-        # Specifically: must include "bench" (the test-bench reservation toolset)
-        assert "bench" in enabled, (
-            f"bench toolset not enabled; LLM cannot call reservation tools. "
+        # Specifically: must include "car" (the 车辆预约 toolset)
+        assert "car" in enabled, (
+            f"car toolset not enabled; LLM cannot call reservation tools. "
             f"enabled={enabled}"
         )
