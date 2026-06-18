@@ -115,6 +115,22 @@ def _fsm_input_location_action(value: str) -> str:
     return "fsm_input_location_other" if value == "其它" else "fsm_input_location"
 
 
+# 2026-06-18 Bug #1 修复：构造 button value 时必须带 "value" 字段。
+# 之前写的是 {"action": "fsm_input_task"} —— card_action_handler 收不到 text，
+# fsm.advance("") 进 INPUT_TASK 空文本分支（"❓ 任务名称不能为空"）。
+# 现在按钮 value 是 {"action": "fsm_input_task", "value": "MFF调试"}，
+# ws_client 不归一化（因为 value.get("value")="MFF调试" truthy），
+# card_action_handler 走 else: text = value.get("value") = "MFF调试"。
+def _task_button(text: str) -> dict:
+    return {"text": text,
+            "value": {"action": _fsm_input_task_action(text), "value": text}}
+
+
+def _location_button(text: str) -> dict:
+    return {"text": text,
+            "value": {"action": _fsm_input_location_action(text), "value": text}}
+
+
 def _card_wrap(body_elements: list[dict], *, wide: bool = True) -> dict:
     """Card 2.0 schema 包装（2026-06-18 review：select_static 是 Card 2.0
     特性，飞书 Card 1.0 schema 会静默忽略 select_static 元素；之前 _type_card
@@ -753,7 +769,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                      f"  • 点击下方常用任务快速填入（推荐新手）\n"
                      f"  • 或直接输入自己的任务名称\n"
                      f"  • 点「其它」可跳过示例自由输入"),
-            "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
+            "buttons": [_task_button(t)
                         for t in TASK_HINT_BUTTONS]
         }
 
@@ -780,7 +796,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                      f"  • 点击下方常用任务快速填入（推荐新手）\n"
                      f"  • 或直接输入自己的任务名称\n"
                      f"  • 点「其它」可跳过示例自由输入"),
-            "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
+            "buttons": [_task_button(t)
                         for t in TASK_HINT_BUTTONS]
         }
 
@@ -823,7 +839,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                         "  • 或直接输入自己的任务名称\n"
                         "  • 点「其它」可跳过示例自由输入\n"
                         "🚪 若想取消本次约车，请说「算了」/「取消」/「退出」",
-                "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
+                "buttons": [_task_button(t)
                             for t in TASK_HINT_BUTTONS]
             }
         car_state.save(user_id, task_name=task)
@@ -834,7 +850,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                     f"  • 点击下方常用地点快速填入\n"
                     f"  • 或直接输入自己的地点\n"
                     f"  • 点「其它」可跳过列表自由输入",
-            "buttons": [{"text": c, "value": {"action": _fsm_input_location_action(c)}}
+            "buttons": [_location_button(c)
                         for c in LOCATION_BUTTONS]
         }
 
@@ -861,7 +877,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                         "  • 或直接输入自己的地点\n"
                         "  • 点「其它」可跳过列表自由输入\n"
                         "🚪 若想取消本次约车，请说「算了」/「取消」/「退出」",
-                "buttons": [{"text": c, "value": {"action": _fsm_input_location_action(c)}}
+                "buttons": [_location_button(c)
                             for c in LOCATION_BUTTONS]
             }
         car_state.save(user_id, location=loc)
@@ -885,7 +901,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                          "  • 点击下方常用任务快速填入\n"
                          "  • 或直接输入新的任务名称\n"
                          "  • 点「其它」可跳过示例自由输入"),
-                "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
+                "buttons": [_task_button(t)
                             for t in TASK_HINT_BUTTONS]
             }
         return STATE_CONFIRM, {

@@ -265,12 +265,30 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     set_current_caller(caller)
 
     # ── 状态机：escape 关键词（用户在挂起状态时说「算了/换个」→ clear） ─
+    # 2026-06-18 Bug B 修复：用户改主意想查"我的预约"时，FSM 不应该把
+    # 整句话当 task_name 记录。先尝试 fast-path 查询（"我的预约" /
+    # "我的待审批" / "查可用车辆"），匹配则清状态 + 返回查询结果，
+    # 让用户能优雅退出 booking 流程。
     if car_state.get(user_id) is not None:
         norm = text.strip().strip("「」『』[]\"'").lower()
         if norm in _ESCAPE_PHRASES:
             car_state.clear(user_id)
             sender.send_text_as_card(chat_id, "已取消本次操作。")
             return
+        # 智能 escape：用户在挂起状态下说查询类语句 → 清状态 + 走 fast-path
+        query_intent = _match_query_intent_during_fsm(text)
+        if query_intent:
+            car_state.clear(user_id)
+            # 重新走 fast-path（in_fsm 已清 → 走正常 fast-path 分支）
+            fast = _try_fast_path(text, user_id, role)
+            if fast is not None:
+                if fast.get("blocked"):
+                    sender.send_text_as_card(chat_id, fast["text"])
+                elif fast.get("card"):
+                    sender.send_card(chat_id, fast["card"])
+                else:
+                    sender.send_text_as_card(chat_id, fast.get("text") or _ERROR_REPLY)
+                return
 
     # ── Layer 0.5/0.6: Fast paths（直接调工具，<1s） ─────────────────
     fast = _try_fast_path(text, user_id, role)
@@ -306,10 +324,15 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         if response.get("card"):
             sender.send_card(chat_id, response["card"])
         elif response.get("text") or response.get("buttons"):
-            # 拼接 text + buttons（spec §3.3 各状态用 text 描述 + 按钮组）
-            text_lines = [response.get("text", "")]
-            for btn in response.get("buttons", []):
-                text_lines.append(f"  · {btn['text']}")
+            # 2026-06-18 Bug A 修复：text + buttons 走 Card 2.0 渲染（可点击按钮），
+            # 之前拼成 "· 文本" 纯文本行（飞书看不到点击按钮）。
+            # 复用 card_action_handler._render_fsm_response 的逻辑。
+            from bot.card_action_handler import _render_fsm_response
+            _toast, _card = _render_fsm_response(response)
+            if _card is not None:
+                sender.send_card(chat_id, _card)
+            else:
+                sender.send_text_as_card(chat_id, response.get("text", ""))
             sender.send_text_as_card(chat_id, "\n".join(s for s in text_lines if s))
         else:
             sender.send_text_as_card(chat_id, _ERROR_REPLY)
@@ -520,6 +543,28 @@ _TYPE_KEYWORDS = (
     # 英文拼写
     "大Fcar",
 )
+
+
+# 2026-06-18 Bug B 修复：用户在 FSM 挂起状态下输入查询类语句（想改主意
+# 查"我的预约"）时，应该清 FSM 状态走 fast-path，而不是把整句当 task_name。
+_QUERY_INTENT_DURING_FSM = (
+    re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下)?\s*(一下\s*)?我的\s*(预约记录|预约|所有预约|预约历史|约车记录)[\s!！。.]*$'),
+    re.compile(r'^(查询|查看|查|看看|帮我查|帮我看)?\s*(我的)?\s*(待审批列表|待审批|待我审批|审批列表|审批记录|待审批记录)[\s!！。.]*$'),
+    re.compile(r'^(查询|查看|看看|有什么|列出|看|查)(\s*(所有|可用))?\s*(车辆|车)(\s*(列表|号))?[\s!！。.]*$'),
+    re.compile(r'^车辆(\s*(列表))?[\s!！。.]*$'),
+    re.compile(r'^我的\s*(权限|角色|身份)[\s!！。.]*$'),
+)
+
+
+def _match_query_intent_during_fsm(text: str) -> bool:
+    """用户在 FSM 挂起状态时输入查询类语句 → 返回 True 让 handler 清状态走 fast-path。"""
+    norm = (text or "").strip()
+    if not norm:
+        return False
+    for pat in _QUERY_INTENT_DURING_FSM:
+        if pat.match(norm):
+            return True
+    return False
 
 
 def _empty_args(m) -> dict:
