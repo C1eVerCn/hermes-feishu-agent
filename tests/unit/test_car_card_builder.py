@@ -4,11 +4,47 @@ import pytest
 from car_tools import card_builder as cb
 
 
+def _find_actions(card):
+    """Card 1.0/2.0 兼容：从 card 找 actions 容器（Card 1.0）或 buttons 列表
+    （Card 2.0：可能在 body.elements 顶层，也可能在 column_set.columns[].elements 里）。
+
+    2026-06-18 横排化后：build_vehicles_card 把 select_buttons 包成 _button_row
+    (column_set)，cancel_btn 单独一个 _button_row。所以 buttons 散在两个
+    column_set 里，本 helper 递归收集所有 button 元素（按顺序）。
+    """
+    def _collect(elements: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for e in elements:
+            if e.get("tag") == "button":
+                out.append(e)
+            elif e.get("tag") == "column_set" and isinstance(e.get("columns"), list):
+                for col in e["columns"]:
+                    if isinstance(col.get("elements"), list):
+                        out.extend(_collect(col["elements"]))
+        return out
+    return _collect(card.get("body", {}).get("elements", card.get("elements", [])))
+
+
+def _find_actions_inline(elements):
+    """与 _find_actions 类似，但接受直接的 elements 列表（不包 card 字典）。"""
+    def _collect(els: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for e in els:
+            if e.get("tag") == "button":
+                out.append(e)
+            elif e.get("tag") == "column_set" and isinstance(e.get("columns"), list):
+                for col in e["columns"]:
+                    if isinstance(col.get("elements"), list):
+                        out.extend(_collect(col["elements"]))
+        return out
+    return _collect(elements)
+
+
 # ── 1. vehicles_card ──────────────────────────────────────────────────────
 
 def test_vehicles_card_empty():
     card = cb.build_vehicles_card([])
-    elements = card["elements"]
+    elements = card["body"]["elements"]
     # 应该只有一条 div，提示无车辆
     assert any("没有可用车辆" in e["text"]["content"] for e in elements)
     # 不应有按钮
@@ -23,12 +59,12 @@ def test_vehicles_card_with_vehicles():
          "license_plate": ""},
     ]
     card = cb.build_vehicles_card(vehicles)
-    elements = card["elements"]
-    # 1 个 div（标题）+ 1 个 div（表格）+ 1 个 action（按钮组）
-    assert len(elements) == 3
-    actions = next(e for e in elements if e["tag"] == "action")
+    elements = card["body"]["elements"]
+    # Card 2.0 横排化：1 div 标题 + 1 div 表格 + 2 column_set（选车 + 取消分两组）
+    assert len(elements) == 4
+    actions = _find_actions_inline(elements)
     # 2 个选车按钮 + 1 个取消按钮 = 3 个
-    assert len(actions["actions"]) == 3
+    assert len(actions) == 3
 
 
 def test_vehicles_card_max_5_buttons():
@@ -52,17 +88,17 @@ def test_vehicles_card_max_5_buttons():
         vehicles.append({"vehicle_no": f"T{i:03d}", "vehicle_type": "CM0", "platform": "Thor"})
     assert len(vehicles) == 10
     card = cb.build_vehicles_card(vehicles)
-    actions = next(e for e in card["elements"] if e["tag"] == "action")
+    actions = _find_actions(card)
     # 10 个选车按钮 + 1 个取消 = 11 个
-    assert len(actions["actions"]) == 11
+    assert len(actions) == 11
 
 
 def test_vehicles_button_payload_contains_vehicle_fields():
     vehicles = [{"vehicle_no": "PNV332", "vehicle_type": "DM2", "platform": "Xavier",
                  "license_plate": "沪A1"}]
     card = cb.build_vehicles_card(vehicles)
-    actions = next(e for e in card["elements"] if e["tag"] == "action")
-    btn0 = actions["actions"][0]
+    actions = _find_actions(card)
+    btn0 = actions[0]
     assert btn0["value"]["action"] == "select_vehicle"
     assert btn0["value"]["vehicle_no"] == "PNV332"
     assert btn0["value"]["vehicle_type"] == "DM2"
@@ -72,59 +108,14 @@ def test_vehicles_button_payload_contains_vehicle_fields():
 def test_vehicles_cancel_button():
     vehicles = [{"vehicle_no": "PNV332", "vehicle_type": "DM2", "platform": "Xavier"}]
     card = cb.build_vehicles_card(vehicles)
-    actions = next(e for e in card["elements"] if e["tag"] == "action")
-    cancel = actions["actions"][-1]
+    actions = _find_actions(card)
+    cancel = actions[-1]
     assert cancel["text"]["content"] == "取消"
     assert cancel["value"]["action"] == "cancel_flow"
     assert cancel["type"] == "danger"
 
 
-# ── 2. missing_fields_card ────────────────────────────────────────────────
-
-def test_missing_fields_card_renders_summary():
-    card = cb.build_missing_fields_card("缺少：任务名称、地点")
-    elements = card["elements"]
-    assert len(elements) == 1
-    assert "缺少" in elements[0]["text"]["content"]
-
-
-def test_missing_fields_card_no_buttons():
-    card = cb.build_missing_fields_card("X")
-    assert not any(e["tag"] == "action" for e in card["elements"])
-
-
-# ── 3. confirm_card ──────────────────────────────────────────────────────
-
-def test_confirm_card_has_confirm_and_cancel_buttons():
-    args = {
-        "vehicle_no": "PNV332", "vehicle_type": "DM2", "platform": "Xavier",
-        "start_time": "2026-06-16 09:00", "end_time": "2026-06-16 18:00",
-        "task_name": "高速测试", "location": "A区",
-    }
-    card = cb.build_confirm_card("summary text", args)
-    actions = next(e for e in card["elements"] if e["tag"] == "action")
-    assert len(actions["actions"]) == 2
-    confirm_btn = actions["actions"][0]
-    cancel_btn = actions["actions"][1]
-    assert confirm_btn["value"]["action"] == "confirm_booking"
-    assert cancel_btn["value"]["action"] == "cancel_flow"
-
-
-def test_confirm_card_button_payload_includes_args():
-    args = {
-        "vehicle_no": "PNV332", "vehicle_type": "DM2", "platform": "Xavier",
-        "start_time": "2026-06-16 09:00", "end_time": "2026-06-16 18:00",
-        "task_name": "高速测试", "location": "A区", "remark": "VIP",
-    }
-    card = cb.build_confirm_card("summary", args)
-    actions = next(e for e in card["elements"] if e["tag"] == "action")
-    confirm_value = actions["actions"][0]["value"]
-    assert confirm_value["vehicleNo"] == "PNV332"
-    assert confirm_value["taskName"] == "高速测试"
-    assert confirm_value["remark"] == "VIP"
-
-
-# ── 4. success_card ───────────────────────────────────────────────────────
+# ── 2. success_card ───────────────────────────────────────────────────────
 
 def test_success_card_renders_details():
     result = {
@@ -135,7 +126,7 @@ def test_success_card_renders_details():
         "dispatchers": [{"name": "Alice", "email": "a@x.com"}],
     }
     card = cb.build_success_card(result)
-    text_contents = [e["text"]["content"] for e in card["elements"] if "text" in e]
+    text_contents = [e["text"]["content"] for e in card["body"]["elements"] if "text" in e]
     # 应该含「预约提交成功」
     assert any("预约提交成功" in c for c in text_contents)
     # 应该含 dispatchers 名字
@@ -150,7 +141,7 @@ def test_success_card_no_dispatchers():
         "dispatchers": [],
     }
     card = cb.build_success_card(result)
-    text_contents = [e["text"]["content"] for e in card["elements"] if "text" in e]
+    text_contents = [e["text"]["content"] for e in card["body"]["elements"] if "text" in e]
     assert any("（无）" in c for c in text_contents)
 
 
@@ -159,19 +150,19 @@ def test_success_card_no_buttons():
               "start_time": "2026-06-16 09:00", "end_time": "2026-06-16 18:00",
               "task_name": "t", "location": "l"}
     card = cb.build_success_card(result)
-    assert not any(e["tag"] == "action" for e in card["elements"])
+    assert not any(e["tag"] == "action" for e in card["body"]["elements"])
 
 
 # ── 5. fail_card ──────────────────────────────────────────────────────────
 
 def test_fail_card_renders_error():
     card = cb.build_fail_card("MCP 调用失败", context="提交预约")
-    elements = card["elements"]
+    elements = card["body"]["elements"]
     assert any("❌" in e["text"]["content"] for e in elements)
     assert any("提交预约" in e["text"]["content"] for e in elements)
 
 
 def test_fail_card_no_context():
     card = cb.build_fail_card("some error")
-    elements = card["elements"]
+    elements = card["body"]["elements"]
     assert any("❌" in e["text"]["content"] for e in elements)

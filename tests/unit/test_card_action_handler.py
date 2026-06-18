@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 import bot.card_action_handler as cah
+import bot.car_state as car_state
 import ocl.identity as identity
 from ocl.tool_guard import CallerIdentity, set_current_caller
 
@@ -27,24 +28,27 @@ def _ident(tmp_path, monkeypatch):
 
 # ── select_vehicle ────────────────────────────────────────────────────────
 
-def test_select_vehicle_with_missing_fields_returns_card():
-    """用户点 [选N] 但 dry_run 缺字段 → 返回 missing-fields card。"""
-    patcher = patch.object(cah.car_handlers, "_dry_run_reservation",
-                           return_value=json.dumps({
-                               "dry_run": True,
-                               "missing_fields": ["start_time", "end_time",
-                                                  "task_name", "location"],
-                               "summary": "缺少信息",
-                               "args": {"vehicle_no": "PNV332"},
-                           }, ensure_ascii=False))
-    patcher.start()
+def test_select_vehicle_advances_fsm_to_duration_confirm():
+    """用户点 [选N] → 推进 FSM 到 DURATION_CONFIRM 选时段（不再走 _dry_run）。
+
+    2026-06-18 改：原测试 mock _dry_run_reservation 让用户卡在 missing_fields
+    提示（"我还缺少以下信息：开始时间/结束时间/任务名称/地点"），UX 断裂。
+    修复后 _handle_select_vehicle 直接推进 FSM：写 vehicle_no + state="DURATION_CONFIRM"
+    + advance("") → FSM 渲染时段选项卡片。
+    """
+    car_state.save("ou_user", state="SELECT_FROM_LIST", duration_minutes=30)
     toast, card = cah.handle("ou_user", {"action": "select_vehicle",
                                           "vehicle_no": "PNV332",
                                           "vehicle_type": "DM2",
-                                          "platform": "Xavier"})
-    assert "已选" in toast or "已选车辆" in toast
+                                          "platform": "Xavier",
+                                          "license_plate": "沪A1"})
+    pending = car_state.get("ou_user")
+    # 1. car_state 推进到 DURATION_CONFIRM（duration=30 让 _match_slots 返 3 个时段）
+    assert pending.state == "DURATION_CONFIRM"
+    assert pending.vehicle_no == "PNV332"
+    # 2. 卡片存在（FSM 渲染时段选项）
     assert card is not None
-    patcher.stop()
+    car_state.clear("ou_user")
 
 
 def test_select_vehicle_no_vehicle_no_rejected():

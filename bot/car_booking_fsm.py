@@ -1,7 +1,7 @@
 """车辆预约对话流 FSM（spec §3.2 / §3.3）。
 
-14 状态机：
-  START → DIRECT_BY_ID / SELECT_VEHICLE_TYPE → CONFIRM_CHIP → VEHICLE_ENTRY
+13 状态机（2026-06-18 review：删 VEHICLE_ENTRY，新流程 CONFIRM_CHIP 直接进 SELECT_DURATION）：
+  START → DIRECT_BY_ID / SELECT_VEHICLE_TYPE → CONFIRM_CHIP
   → SELECT_DURATION / SELECT_FROM_LIST → DURATION_CONFIRM ★ → SELECT_TIME
   → INPUT_TASK → INPUT_LOCATION → CONFIRM → COMMIT → SUCCESS
 
@@ -15,6 +15,8 @@ import re
 from datetime import datetime, timedelta
 
 from bot import car_state
+from car_tools import normalizers
+from car_tools.card_builder import _button_row
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +26,6 @@ STATE_START = "START"
 STATE_DIRECT_BY_ID = "DIRECT_BY_ID"
 STATE_SELECT_VEHICLE_TYPE = "SELECT_VEHICLE_TYPE"
 STATE_CONFIRM_CHIP = "CONFIRM_CHIP"
-STATE_VEHICLE_ENTRY = "VEHICLE_ENTRY"
 STATE_SELECT_DURATION = "SELECT_DURATION"
 STATE_SELECT_FROM_LIST = "SELECT_FROM_LIST"
 STATE_DURATION_CONFIRM = "DURATION_CONFIRM"
@@ -37,7 +38,7 @@ STATE_SUCCESS = "SUCCESS"
 
 ALL_STATES = frozenset({
     STATE_START, STATE_DIRECT_BY_ID, STATE_SELECT_VEHICLE_TYPE,
-    STATE_CONFIRM_CHIP, STATE_VEHICLE_ENTRY, STATE_SELECT_DURATION,
+    STATE_CONFIRM_CHIP, STATE_SELECT_DURATION,
     STATE_SELECT_FROM_LIST, STATE_DURATION_CONFIRM, STATE_SELECT_TIME,
     STATE_INPUT_TASK, STATE_INPUT_LOCATION, STATE_CONFIRM,
     STATE_COMMIT, STATE_SUCCESS,
@@ -68,8 +69,10 @@ ENTRY_MODE_BUTTONS = ["已知编号", "帮我查"]
 TASK_HINT_BUTTONS = ["MFF调试", "路测", "数据采集"]
 LOCATION_BUTTONS = ["上海", "北京", "广州", "深圳"]
 
-# 时段候选上限（spec §5.2）
-MAX_SLOT_CANDIDATES = 3
+# 时段候选上限（spec §5.2）—— 2026-06-18 改：用户希望看所有可用时段而非 3 个 mock 候选
+# 改成 6 个跨 24h（2 小时间隔），让用户有更多选择
+MAX_SLOT_CANDIDATES = 6
+SLOT_INTERVAL_HOURS = 2
 # 单次预约时长（spec §5.4）= 8h 上限，30min 步进
 MIN_DURATION_MINUTES = 30
 DURATION_STEP_MINUTES = 30
@@ -77,7 +80,8 @@ MAX_DURATION_MINUTES = 480  # 8h
 DEFAULT_DURATION_MINUTES = 30  # 初始 30 分钟
 
 # 卡片回调按钮的特殊文本标记（card_action_handler._handle_fsm_button 用）
-_FSM_DIRECT_BY_ID_MARKER = "__fsm_direct_by_id__"
+# 2026-06-18 review 删 _FSM_DIRECT_BY_ID_MARKER：orphan marker，emit 端和 consume 端
+# 都不存在；用户报编号是 START 状态文本路径（"请直接输入车辆编号"），不需要 callback。
 _FSM_DUR_MINUS_MARKER = "__fsm_dur_minus__"
 _FSM_DUR_PLUS_MARKER = "__fsm_dur_plus__"
 _FSM_DUR_CONFIRM_MARKER = "__fsm_dur_confirm__"
@@ -93,80 +97,164 @@ def _format_duration(minutes: int) -> str:
     return f"{h} 小时" + (f" {m} 分钟" if m else "")
 
 
+def _card_wrap(body_elements: list[dict], *, wide: bool = True) -> dict:
+    """Card 2.0 schema 包装（2026-06-18 review：select_static 是 Card 2.0
+    特性，飞书 Card 1.0 schema 会静默忽略 select_static 元素；之前 _type_card
+    /_chip_card 用了 1.0 结构 → 用户只看到 div 文字，看不到下拉）。
+
+    Card 2.0 也不支持 `tag: "action"` 容器（旧 Card 1.0 用 `{"tag":"action","actions":[btn1,btn2]}`
+    包多个 button；Card 2.0 要求 button 直接作为 body.elements 元素）—— 飞书
+    server 返回 ErrCode 200861 "unsupported tag action"。本 helper 自动展平
+    action 容器，调用方写 Card 1.0 风格也能正确发 Card 2.0。
+
+    2026-06-18 修复：之前返回 `{"card": <v2>}` 多包一层，与 _card_base 不一致
+    也与飞书 raw callback 期望冲突。飞书回调 raw `data` 期望直接是 Card 2.0 dict
+    （{schema, config, body}），多一层 "card" 键会导致飞书找不到 schema 字段，
+    卡片内的 button / select_static 都不渲染。改为直接返回 Card 2.0 dict（与
+    _card_base 一致）。
+    """
+    flat: list[dict] = []
+    for e in body_elements:
+        if isinstance(e, dict) and e.get("tag") == "action" and isinstance(e.get("actions"), list):
+            flat.extend(e["actions"])
+        else:
+            flat.append(e)
+    card: dict = {
+        "schema": "2.0",
+        "config": {},
+        "body": {"elements": flat},
+    }
+    if wide:
+        card["config"]["wide_screen_mode"] = True
+    return card
+
+
 def _entry_card() -> dict:
     """START 状态：入口卡。问"您是否知道要约的车辆编号？"，[知道] [不知道] 二选一。"""
-    return {
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": "**🚗 车辆预约**\n您是否知道要预约的车辆编号？"}},
-                {"tag": "action", "actions": [
-                    {"tag": "button", "type": "primary",
-                     "text": {"tag": "plain_text", "content": "知道"},
-                     "value": {"action": "fsm_known_yes"}},
-                    {"tag": "button", "type": "default",
-                     "text": {"tag": "plain_text", "content": "不知道"},
-                     "value": {"action": "fsm_known_no"}},
-                ]}
-            ]
-        }
-    }
+    return _card_wrap([
+        {"tag": "div", "text": {"tag": "lark_md",
+         "content": "**🚗 车辆预约**\n是否知道要预约的车辆编号？"}},
+        _button_row([
+            {"tag": "button", "type": "primary",
+             "text": {"tag": "plain_text", "content": "知道"},
+             "value": {"action": "fsm_known_yes"}},
+            {"tag": "button", "type": "default",
+             "text": {"tag": "plain_text", "content": "不知道"},
+             "value": {"action": "fsm_known_no"}},
+        ]),
+    ])
+
+
+def _select_card(title: str, placeholder: str, options: list, action: str) -> dict:
+    """通用 select_static 卡片骨架（Card 2.0 schema）。
+
+    options 是 list[str]（选项的 value 与 text 同名）。lark-oapi CardBuilder.select
+    （verified: channel/card/builder.py:188-208）输出也是这种结构，**不**带
+    initial_option 字段（Card 2.0 select_static 不支持）。value 字段携带
+    action 标识，callback 时由 feishu/ws_client._extract_card_action 归一化
+    option → value['value']。
+    """
+    return _card_wrap([
+        {"tag": "div", "text": {"tag": "lark_md", "content": title}},
+        {"tag": "select_static",
+         "placeholder": {"tag": "plain_text", "content": placeholder},
+         "options": [
+             {"text": {"tag": "plain_text", "content": o}, "value": o}
+             for o in options
+         ],
+         "value": {"action": action}}
+    ])
 
 
 def _type_card() -> dict:
-    """SELECT_VEHICLE_TYPE：5 车型按钮（用户点了"不知道"后展示）。"""
-    return {
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": "**🚗 车辆预约**\n请选择车型："}},
-                {"tag": "action", "actions": [
-                    {"tag": "button", "type": "primary",
-                     "text": {"tag": "plain_text", "content": t},
-                     "value": {"action": "fsm_select", "value": t}}
-                    for t in VEHICLE_TYPE_BUTTONS
-                ]}
-            ]
-        }
-    }
+    """SELECT_VEHICLE_TYPE：单选下拉（替代原 15 个 button）。"""
+    return _select_card(
+        "**🚗 车辆预约**\n请选择车型：",
+        "点击选择车型",
+        VEHICLE_TYPE_BUTTONS,
+        "fsm_select_type",
+    )
+
+
+def _chip_card(vehicle_type_detail: str = "") -> dict:
+    """CONFIRM_CHIP：单选下拉（4 个芯片）。vehicle_type_detail 用于标题回显
+    已选车型；review finding 1 修复：原 f-string `{''}` 永远空，现传真实值。"""
+    detail_suffix = f" {vehicle_type_detail}" if vehicle_type_detail else ""
+    return _select_card(
+        f"**🧠 已选车型{detail_suffix}**\n请选择芯片平台：",
+        "点击选择芯片",
+        CHIP_BUTTONS,
+        "fsm_select_chip",
+    )
 
 
 def _duration_card(pending) -> dict:
-    """SELECT_DURATION：当前时长显示 + [-30] [+30] [确认] 按钮。"""
+    """SELECT_DURATION：当前时长显示 + [-30] [+30] [确认] 按钮。
+
+    2026-06-18 修复：飞书 Card 2.0 button 的 disabled 字段不是所有客户端都支持，
+    灰按钮可能不渲染。改为：cur=MIN 时 −30 按钮文案变成 "0" 占位（也点击），
+    实际校验仍在 FSM 端（_advance_inner 的 fsm_dur_minus 分支判断 cur > MIN）。
+    简化：cur=MIN/MAX 时也显示按钮，文案始终 "−30 分"/"+30 分"；FSM 收到
+    dur_minus/dur_plus 时校验边界并提示"已到最小/最大"。
+    """
     cur = pending.duration_minutes if pending and pending.duration_minutes > 0 else DEFAULT_DURATION_MINUTES
-    can_minus = cur > MIN_DURATION_MINUTES
-    can_plus = cur < MAX_DURATION_MINUTES
-    return {
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": f"**⏱️ 用车时长**\n\n当前：**{_format_duration(cur)}**\n\n"
-                            f"（范围：{_format_duration(MIN_DURATION_MINUTES)} ~ "
-                            f"{_format_duration(MAX_DURATION_MINUTES)}，"
-                            f"步进 {DURATION_STEP_MINUTES} 分钟）"}},
-                {"tag": "action", "actions": [
-                    {"tag": "button", "type": "default",
-                     "text": {"tag": "plain_text", "content": "−30 分钟"},
-                     "value": {"action": "fsm_dur_minus"}},
-                    {"tag": "button", "type": "default",
-                     "text": {"tag": "plain_text", "content": "+30 分钟"},
-                     "value": {"action": "fsm_dur_plus"}},
-                    {"tag": "button", "type": "primary",
-                     "text": {"tag": "plain_text", "content": "确认"},
-                     "value": {"action": "fsm_dur_confirm"}},
-                ]}
-            ]
-        }
-    }
+    return _card_wrap([
+        {"tag": "div", "text": {"tag": "lark_md",
+         "content": f"**⏱️ 用车时长**\n当前：**{_format_duration(cur)}** "
+                    f"（{_format_duration(MIN_DURATION_MINUTES)}~{_format_duration(MAX_DURATION_MINUTES)}，"
+                    f"{DURATION_STEP_MINUTES} 分步进）"}},
+        _button_row([
+            {"tag": "button", "type": "default",
+             "text": {"tag": "plain_text", "content": "−30 分"},
+             "value": {"action": "fsm_dur_minus"}},
+            {"tag": "button", "type": "default",
+             "text": {"tag": "plain_text", "content": "+30 分"},
+             "value": {"action": "fsm_dur_plus"}},
+            {"tag": "button", "type": "primary",
+             "text": {"tag": "plain_text", "content": "确认"},
+             "value": {"action": "fsm_dur_confirm"}},
+        ]),
+    ])
 
 
-def _single_chip(vehicle_type: str) -> str | None:
-    """单芯片车型（保留备用，不再主流程用）。"""
-    single_chip_map = {"DM2": "Xavier", "CT1": "Orin", "CM0": "Thor", "BM2": "ADCU"}
-    return single_chip_map.get(vehicle_type)
+def _do_commit(user_id: str) -> tuple[str, dict]:
+    """调 _commit_single_vehicle_reservation 提交预约。2026-06-18 抽公共函数
+    让 CONFIRM "确认" 和 STATE_COMMIT 分支复用（同一次 fsm.advance 调用里完成，
+    避免切到 STATE_COMMIT 等下一次 advance 时用户没发消息卡住）。
+    """
+    from car_tools import handlers as _h
+    from ocl.tool_guard import set_current_caller, CallerIdentity
+    from ocl import identity as _identity
+    # 2026-06-18 fix：fsm 同步路径未注入 CallerIdentity，booking_mcp_server
+    # 收到 emailAddress='' → 返 {"code":400, "data":None} → normalize 失败
+    # "data 字段不是 dict: NoneType"。必须先注入。
+    pending_c = car_state.get(user_id)
+    user_email = _identity.email_of(user_id)
+    set_current_caller(CallerIdentity(openid=user_id, email=user_email or ""))
+    try:
+        raw = _h._commit_single_vehicle_reservation({
+            "vehicleNo":          pending_c.vehicle_no,
+            "vehicleType":        pending_c.vehicle_type,
+            "vehicleTypeDetail":  pending_c.vehicle_type_detail,
+            "platform":           pending_c.chip,
+            "startTime":          pending_c.start_time,
+            "endTime":            pending_c.end_time,
+            "taskName":           pending_c.task_name,
+            "location":           pending_c.location,
+        })
+        result = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(result, dict) and "error" in result:
+            return STATE_START, {"text": f"提交失败：{result['error']}"}
+        # 持久化 reservation → applicant 映射（spec §7.2 通知）
+        from bot import reservation_store
+        key = f"car|{pending_c.vehicle_no}|{pending_c.start_time}"
+        reservation_store.save(key, user_id, "", pending_c.vehicle_no,
+                              pending_c.start_time, pending_c.end_time,
+                              pending_c.task_name)
+    except Exception as e:
+        log.exception("commit failed")
+        return STATE_START, {"text": f"提交异常：{e}"}
+    return STATE_SUCCESS, _success_card(user_id)
 
 
 def _resolve_vehicle_from_text(text: str, candidates: list) -> dict | None:
@@ -205,20 +293,24 @@ def _resolve_vehicle_from_text(text: str, candidates: list) -> dict | None:
 
 
 def _match_slots(vehicle_no: str, duration_minutes: int) -> list[dict]:
-    """spec §5.2 模糊匹配：今天起向后生成 ≤3 个候选时段。
+    """spec §5.2 模糊匹配：从"现在 + 30min"起向后生成 MAX_SLOT_CANDIDATES 个候选时段，
+    间隔 SLOT_INTERVAL_HOURS 小时。
 
-    MVP：mock 实现。Task 5/6 接入真实后端时替换。
+    2026-06-18 review：原 spec 3 个 / 4 小时间隔 / 从下个整点起 → 改成 6 个 / 2 小时
+    间隔 / 从"现在+30min"起（不等下个整点，让 slot 立刻可用，且时段是连续的）。
+    MVP mock；Task 5/6 接入真实后端时替换为查 fmp 真可用时段。
     行为：
     - duration > 8h → 空列表（spec §5.4）
-    - 否则从下个整点开始，间隔 4h 取 3 个
     """
     if duration_minutes <= 0 or duration_minutes > MAX_DURATION_MINUTES:
         return []
     now = datetime.now()
-    base = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    # 从"现在 + 30min"起，向上取整到 30min（用户能立即选一个 slot 试用）
+    base = now.replace(second=0, microsecond=0) + timedelta(minutes=30)
+    base = base.replace(minute=(base.minute // 30) * 30)
     slots: list[dict] = []
     for i in range(MAX_SLOT_CANDIDATES):
-        start = base + timedelta(hours=i * 4)
+        start = base + timedelta(hours=i * SLOT_INTERVAL_HOURS)
         end = start + timedelta(minutes=duration_minutes)
         slots.append({
             "start": start.strftime("%Y-%m-%d %H:%M"),
@@ -300,6 +392,15 @@ def advance(user_id: str, text: str = "") -> tuple[str, dict]:
     # 持久化新 state 到 car_state（除非返回 START — START 表示"未挂起"，保持原状态）
     if new_state != STATE_START:
         car_state.save(user_id, state=new_state)
+    # 统一 response 形状为 {"text"?: ..., "card"?: <v2_dict>|_build_vehicles_card 结果, "buttons"?: ...}。
+    # _advance_inner 状态分支：
+    #   (a) 直接返回 Card 2.0 dict（来自 _entry_card/_type_card/_chip_card/_duration_card/
+    #       _confirm_card/_success_card 这些 _card_wrap 系，或 _cb.build_*_card 卡构建器）
+    #   (b) 返回 {"text":..., "buttons":...} 简单 dict（需要 _render_fsm_response 拼 Card 2.0）
+    #   (c) 返回 {"text":..., "card": <v2>}/{"text":..., **_card_wrap(...)} 已是正确形状
+    # 包装 (a) 为 {"card": <v2>}；(b) 和 (c) 原样透传。判定用顶层 "schema" == "2.0"。
+    if isinstance(response, dict) and response.get("schema") == "2.0" and "card" not in response:
+        response = {"card": response}
     return new_state, response
 
 
@@ -309,6 +410,16 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     # 全局重置：用户在任何状态说"我想约车"等约车意图时，清状态回到入口
     BOOKING_INTENT_PHRASES = ("我想约车", "我要约车", "帮我约车", "约车", "预约车")
     if text in BOOKING_INTENT_PHRASES and current_state != STATE_START:
+        car_state.clear(user_id)
+        return STATE_START, _entry_card()
+
+    # 2026-06-18 全局 escape：用户在任何"挂起"状态说"算了/取消/退出/不约了"时清 state
+    # 回 START（"等待用户输入"的状态如 DURATION_CONFIRM / INPUT_TASK /
+    # INPUT_LOCATION / CONFIRM 会因非相关输入被误判为"未识别时段"等）——
+    # 截图 19/20 显示用户发"查询我的审批记录"被误判为"未识别时段"，让用户
+    # 能 escape 后重发查询更自然。
+    ESCAPE_PHRASES = ("算了", "取消", "退出", "不约了", "放弃", "不选了")
+    if text.strip() in ESCAPE_PHRASES and current_state not in ("", STATE_START):
         car_state.clear(user_id)
         return STATE_START, _entry_card()
 
@@ -336,15 +447,18 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         if text in VEHICLE_TYPE_BUTTONS:
             # 细分（如 DM0/CM0/427-M1）存到 vehicle_type_detail 字段
             car_state.save(user_id, vehicle_type_detail=text)
+            # 统一用 _chip_card 渲染（与"重渲染"路径一致），UI 不分叉
+            # 2026-06-18 fix：之前用 ** 展开 {"card": <v2>} 会把 card 内的 schema/
+            # config/body 三个键混进 response 顶层，导致飞书 raw 回调 data 字段
+            # 拿到错误结构（"未识别车型「DM0」" 等场景会复现）。改用显式 "card" 键
+            # 包 card_dict 本身。
             return STATE_CONFIRM_CHIP, {
                 "text": f"已选车型 {text}。请选择芯片平台：",
-                "buttons": [{"text": t, "value": {"action": "fsm_select_chip", "value": t}}
-                            for t in CHIP_BUTTONS]
+                "card": _chip_card(vehicle_type_detail=text),
             }
         return STATE_SELECT_VEHICLE_TYPE, {
-            "text": f"未识别车型「{text}」。请从按钮选择：",
-            "buttons": [{"text": t, "value": {"action": "fsm_select_type", "value": t}}
-                        for t in VEHICLE_TYPE_BUTTONS]
+            "text": f"未识别车型「{text}」。请从下拉选择：",
+            "card": _type_card(),
         }
 
     # CONFIRM_CHIP：收芯片按钮 → 直接进 SELECT_DURATION（车型+芯片+时长都明确后才查车）
@@ -356,28 +470,13 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             if not pending_now.duration_minutes:
                 car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
             return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
+        # 未知输入（含旧按钮残留 / 文本乱打）→ 错误回显 + 重渲染下拉卡
+        # review finding 4 修复：原代码删了"未识别芯片「{text}」"错误信息，
+        # 用户看不到自己输错了什么。这里恢复文本反馈 + 卡片（双重显示）。
+        pending_now = car_state.get(user_id)
         return STATE_CONFIRM_CHIP, {
-            "text": f"未识别芯片「{text}」。请从按钮选择：",
-            "buttons": [{"text": t, "value": {"action": "fsm_select_chip", "value": t}}
-                        for t in CHIP_BUTTONS]
-        }
-
-    # VEHICLE_ENTRY：保留兼容（不在主流程用）。收"已知编号"或"帮我查"。
-    if current_state == STATE_VEHICLE_ENTRY:
-        text_clean = text.strip()
-        if text_clean == "已知编号":
-            return STATE_DIRECT_BY_ID, {
-                "text": "请直接输入车辆编号（如 SNV018）：",
-            }
-        if text_clean == "帮我查":
-            pending_now = car_state.get(user_id)
-            if not pending_now.duration_minutes:
-                car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
-            return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
-        return STATE_VEHICLE_ENTRY, {
-            "text": "请选择查车方式：",
-            "buttons": [{"text": t, "value": {"action": "fsm_entry", "value": t}}
-                        for t in ENTRY_MODE_BUTTONS]
+            "text": f"未识别芯片「{chip}」。请从下拉选择：",
+            "card": _chip_card(vehicle_type_detail=pending_now.vehicle_type_detail if pending_now else ""),
         }
 
     # SELECT_DURATION：±30min 按钮选择器（30~480 min，30 步进）
@@ -385,10 +484,20 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         cur = (pending.duration_minutes if pending and pending.duration_minutes > 0
                else DEFAULT_DURATION_MINUTES)
         if text == _FSM_DUR_MINUS_MARKER:
+            if cur <= MIN_DURATION_MINUTES:
+                return STATE_SELECT_DURATION, {
+                    "text": f"已是最小时长 {_format_duration(MIN_DURATION_MINUTES)}，无法再减。",
+                    "card": _duration_card(car_state.get(user_id)),
+                }
             new_dur = max(MIN_DURATION_MINUTES, cur - DURATION_STEP_MINUTES)
             car_state.save(user_id, duration_minutes=new_dur)
             return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
         if text == _FSM_DUR_PLUS_MARKER:
+            if cur >= MAX_DURATION_MINUTES:
+                return STATE_SELECT_DURATION, {
+                    "text": f"已是最大时长 {_format_duration(MAX_DURATION_MINUTES)}，无法再加。",
+                    "card": _duration_card(car_state.get(user_id)),
+                }
             new_dur = min(MAX_DURATION_MINUTES, cur + DURATION_STEP_MINUTES)
             car_state.save(user_id, duration_minutes=new_dur)
             return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
@@ -433,7 +542,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             items = raw.get("items") or raw.get("vehicles") or raw.get("data") or []
             if isinstance(items, list):
                 # 字段名归一化：camelCase → snake_case（card_builder 期望 snake_case）
-                vehicles_list = [_normalize_vehicle_keys(v) for v in items if isinstance(v, dict)]
+                vehicles_list = [normalizers._vehicle_to_card_dict(v) for v in items if isinstance(v, dict)]
 
         # 缓存到 car_state（供 Task 5 文本选车"约第N个"反查）
         car_state.save(user_id,
@@ -452,14 +561,53 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             ql_parts.append(f"{pending_now.chip}芯片")
         query_label = " · ".join(ql_parts) if ql_parts else None
         card = _cb.build_vehicles_card(vehicles_list, query_label=query_label)
+
+        # 2026-06-18 fix：区分"有车可选" vs "该车型×该芯片无车"两种场景，
+        # 避免"已选时长...请选车"误导用户，并给具体可换的芯片建议。
+        # review finding 5 修复：alt_chips 用 CHIP_BUTTONS 而不是硬编码 4 元组，
+        # 单一事实源，新增芯片时自动同步。
+        if vehicles_list:
+            text = f"已选时长 {pending_now.duration_minutes}分钟。请从下方车辆列表选车："
+        else:
+            alt_chips = [c for c in CHIP_BUTTONS if c != pending_now.chip]
+            text = (
+                f"📋 已选 {pending_now.vehicle_type_detail or pending_now.vehicle_type} · "
+                f"{pending_now.chip or '未选芯片'} 当前没有可用车辆。\n"
+                f"建议：换芯片平台（如 {alt_chips[0] if alt_chips else '其他芯片'}）"
+                f"或换个车型重新查。"
+            )
         return STATE_SELECT_FROM_LIST, {
-            "text": f"已选时长 {pending_now.duration_minutes}分钟。请从下方车辆列表选车：",
+            "text": text,
             "card": card,
         }
 
     # DURATION_CONFIRM ★ 模糊匹配（spec §5.2）
     if current_state == STATE_DURATION_CONFIRM:
         pending_dc = car_state.get(user_id)
+        # 0) text 为空：FSM 重新渲染时段选项（不显示"未识别"）
+        #    触发场景：card_action_handler._handle_select_vehicle 写完 vehicle_no
+        #    + state=DURATION_CONFIRM 后调 advance("")，期望返回时段选项按钮。
+        if not text:
+            slots = pending_dc.last_slots or _match_slots(
+                pending_dc.vehicle_no, pending_dc.duration_minutes)
+            if not slots:
+                return STATE_SELECT_TIME, {
+                    "text": "请选预设时间：",
+                    "buttons": [{"text": s, "value": {"action": "fsm_select_time", "value": s}}
+                                for s in ["1小时后", "2小时后", "明早9点", "明天下午2点"]],
+                }
+            # 2026-06-18：6+ 个时段改用 select_static 下拉（移动端友好，避免横排
+            # 按钮在窄屏上溢出）。option 文本是 "MM-DD HH:MM ~ HH:MM"，value 是
+            # 完整 start_time 字符串（card_action_handler 不再需要特殊翻译）。
+            return STATE_DURATION_CONFIRM, {
+                "text": f"已选车辆 {pending_dc.vehicle_no}。请选时段：",
+                "card": _select_card(
+                    title=f"⏰ 时段选项（{pending_dc.vehicle_no}）",
+                    placeholder="点击选择时段",
+                    options=[s["start"] for s in slots],
+                    action="fsm_pick_slot",
+                ),
+            }
         # 1) 如果 vehicle_no 还没定（用户刚到 DURATION_CONFIRM）→ 解析选车
         if not pending_dc.vehicle_no:
             chosen = _resolve_vehicle_from_text(text, pending_dc.last_vehicles or [])
@@ -494,7 +642,8 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         slot = _resolve_slot_from_text(text, slots)
         if not slot:
             return STATE_DURATION_CONFIRM, {
-                "text": f"未识别时段「{text}」。请选 1-{len(slots)} 或报起止时间：",
+                "text": f"未识别时段「{text}」。请选 1-{len(slots)} 或报起止时间：\n"
+                        f"（若想取消本次约车改查其他，请说「算了」/「取消」/「退出」）",
                 "buttons": [{"text": s["label"],
                              "value": {"action": "fsm_pick_slot", "slot_idx": i + 1}}
                             for i, s in enumerate(slots)]
@@ -550,13 +699,14 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         task = _llm_extract_task(text)["task_name"]
         if not task:
             return STATE_INPUT_TASK, {
-                "text": "任务名称不能为空，请重新输入：",
+                "text": "任务名称不能为空，请重新输入或选下面的示例：\n"
+                        f"（若想取消本次约车，请说「算了」/「取消」/「退出」）",
                 "buttons": [{"text": t, "value": {"action": "fsm_input_task", "value": t}}
                             for t in TASK_HINT_BUTTONS]
             }
         car_state.save(user_id, task_name=task)
         return STATE_INPUT_LOCATION, {
-            "text": f"任务：{task}。请输入测试地点：",
+            "text": f"任务：{task}。请输入测试地点（可点击示例或直接输入）：",
             "buttons": [{"text": c, "value": {"action": "fsm_input_location", "value": c}}
                         for c in LOCATION_BUTTONS]
         }
@@ -566,7 +716,8 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         loc = _llm_extract_location(text)["location"]
         if not loc:
             return STATE_INPUT_LOCATION, {
-                "text": "地点不能为空，请重新输入：",
+                "text": "地点不能为空，请重新输入或选下面的示例：\n"
+                        f"（若想取消本次约车，请说「算了」/「取消」/「退出」）",
                 "buttons": [{"text": c, "value": {"action": "fsm_input_location", "value": c}}
                             for c in LOCATION_BUTTONS]
             }
@@ -577,7 +728,10 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     if current_state == STATE_CONFIRM:
         text_clean = text.strip()
         if text_clean == "确认":
-            return STATE_COMMIT, {"text": "正在提交预约…"}
+            # 2026-06-18 修：之前 "确认" 只切到 STATE_COMMIT 等下一次 fsm.advance(text)
+            # 才执行 commit，但用户没再次发消息，state 永远卡在 COMMIT。
+            # 改为"确认"在同一 fsm.advance 调用里完成 commit，返回 SUCCESS 或失败提示。
+            return _do_commit(user_id)
         if text_clean == "取消":
             car_state.clear(user_id)
             return STATE_START, _entry_card()
@@ -596,34 +750,9 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             ]
         }
 
-    # COMMIT：调 _commit_single_vehicle_reservation
+    # COMMIT：调 _commit_single_vehicle_reservation（保留以兼容 car_state 中残留 state=COMMIT）
     if current_state == STATE_COMMIT:
-        from car_tools import handlers as _h
-        pending_c = car_state.get(user_id)
-        try:
-            raw = _h._commit_single_vehicle_reservation({
-                "vehicleNo":          pending_c.vehicle_no,
-                "vehicleType":        pending_c.vehicle_type,
-                "vehicleTypeDetail":  pending_c.vehicle_type_detail,
-                "platform":           pending_c.chip,
-                "startTime":          pending_c.start_time,
-                "endTime":            pending_c.end_time,
-                "taskName":           pending_c.task_name,
-                "location":           pending_c.location,
-            })
-            result = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(result, dict) and "error" in result:
-                return STATE_START, {"text": f"提交失败：{result['error']}"}
-            # 持久化 reservation → applicant 映射（spec §7.2 通知）
-            from bot import reservation_store
-            key = f"car|{pending_c.vehicle_no}|{pending_c.start_time}"
-            reservation_store.save(key, user_id, "", pending_c.vehicle_no,
-                                  pending_c.start_time, pending_c.end_time,
-                                  pending_c.task_name)
-        except Exception as e:
-            log.exception("commit failed")
-            return STATE_START, {"text": f"提交异常：{e}"}
-        return STATE_SUCCESS, _success_card(user_id)
+        return _do_commit(user_id)
 
     # SUCCESS：终态；不响应任何输入（清状态回 START）
     if current_state == STATE_SUCCESS:
@@ -645,58 +774,37 @@ def _confirm_card(user_id: str) -> dict:
         f"任务：{p.task_name}\n"
         f"地点：{p.location}"
     )
-    return {
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
-                {"tag": "action", "actions": [
-                    {"tag": "button", "type": "primary",
-                     "text": {"tag": "plain_text", "content": "确认"},
-                     "value": {"action": "fsm_confirm", "value": "确认"}},
-                    {"tag": "button", "type": "default",
-                     "text": {"tag": "plain_text", "content": "修改"},
-                     "value": {"action": "fsm_confirm", "value": "修改"}},
-                    {"tag": "button", "type": "danger",
-                     "text": {"tag": "plain_text", "content": "取消"},
-                     "value": {"action": "fsm_confirm", "value": "取消"}},
-                ]}
-            ]
-        }
-    }
+    return _card_wrap([
+        {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
+        _button_row([
+            {"tag": "button", "type": "primary",
+             "text": {"tag": "plain_text", "content": "确认"},
+             "value": {"action": "fsm_confirm", "value": "确认"}},
+            {"tag": "button", "type": "default",
+             "text": {"tag": "plain_text", "content": "修改"},
+             "value": {"action": "fsm_confirm", "value": "修改"}},
+            {"tag": "button", "type": "danger",
+             "text": {"tag": "plain_text", "content": "取消"},
+             "value": {"action": "fsm_confirm", "value": "取消"}},
+        ])
+    ])
 
 
 def _success_card(user_id: str) -> dict:
     """SUCCESS 状态：成功卡。"""
     from bot import car_state
     p = car_state.get(user_id)
-    return {
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md",
-                 "content": f"**✅ 预约提交成功，等待调度员审批**\n\n"
-                            f"车辆编号：{p.vehicle_no}\n"
-                            f"车型：{p.vehicle_type or '-'} · {p.chip or '-'} 芯片\n"
-                            f"时间：{p.start_time} ~ {p.end_time}\n"
-                            f"任务：{p.task_name}\n"
-                            f"地点：{p.location}"}}
-            ]
-        }
-    }
+    return _card_wrap([
+        {"tag": "div", "text": {"tag": "lark_md",
+         "content": f"**✅ 预约提交成功，等待调度员审批**\n\n"
+                    f"车辆编号：{p.vehicle_no}\n"
+                    f"车型：{p.vehicle_type or '-'} · {p.chip or '-'} 芯片\n"
+                    f"时间：{p.start_time} ~ {p.end_time}\n"
+                    f"任务：{p.task_name}\n"
+                    f"地点：{p.location}"}}
+    ])
 
 
-def _normalize_vehicle_keys(v: dict) -> dict:
-    """MCP 返回的 camelCase 字段归一化为 snake_case，供 build_vehicles_card 消费。
-
-    build_vehicles_card 期望 vehicle_no / vehicle_type / platform / license_plate / vin /
-    vehicle_type_detail。MCP 边界可能传 vehicleNo / vehicleType / platform / licensePlate / vin。
-    """
-    return {
-        "vehicle_no":    v.get("vehicleNo") or v.get("vehicle_no", ""),
-        "vehicle_type":  v.get("vehicleType") or v.get("vehicle_type", ""),
-        "vehicle_type_detail": v.get("vehicleTypeDetail") or v.get("vehicle_type_detail", ""),
-        "platform":      v.get("platform", ""),
-        "license_plate": v.get("licensePlate") or v.get("license_plate", ""),
-        "vin":           v.get("vin", ""),
-    }
+# _normalize_vehicle_keys 委托给 car_tools.normalizers._vehicle_to_card_dict
+# （单一事实源；调用方直接 import 使用）。原 wrapper 已在 2026-06-18 review
+# finding 9 修复时删除。

@@ -18,10 +18,10 @@ from car_tools import mcp_client as _mc
 
 
 def test_states_defined():
-    """14 个状态名必须存在（spec §3.2）。"""
+    """13 个状态名必须存在（spec §3.2，2026-06-18 删 VEHICLE_ENTRY）。"""
     expected = {
         "STATE_START", "STATE_DIRECT_BY_ID", "STATE_SELECT_VEHICLE_TYPE",
-        "STATE_CONFIRM_CHIP", "STATE_VEHICLE_ENTRY", "STATE_SELECT_DURATION",
+        "STATE_CONFIRM_CHIP", "STATE_SELECT_DURATION",
         "STATE_SELECT_FROM_LIST", "STATE_DURATION_CONFIRM", "STATE_SELECT_TIME",
         "STATE_INPUT_TASK", "STATE_INPUT_LOCATION", "STATE_CONFIRM",
         "STATE_COMMIT", "STATE_SUCCESS",
@@ -90,9 +90,9 @@ def test_resolve_returns_none():
 # ── _match_slots helper ──────────────────────────────────────────────────────
 
 def test_match_slots_returns_three_candidates():
-    """≤3 个候选时段，duration_minutes=120 走完应返非空。"""
+    """≤6 个候选时段，duration_minutes=120 走完应返非空（2026-06-18 review 3→6）。"""
     slots = _match_slots("PNV001", 120)
-    assert len(slots) == 3
+    assert len(slots) == 6
     assert all("start" in s and "end" in s and "label" in s for s in slots)
 
 
@@ -184,7 +184,7 @@ def test_advance_duration_confirm_by_index(monkeypatch):
     assert "buttons" in resp  # 候选时段按钮
     pending = car_state.get("ou_t4")
     assert pending.vehicle_no == "PNV000"
-    assert len(pending.last_slots) == 3  # 候选时段已缓存
+    assert len(pending.last_slots) == 6  # 候选时段已缓存（2026-06-18 review 3→6）
     car_state.clear("ou_t4")
 
 
@@ -358,15 +358,39 @@ def test_advance_input_location_saves_and_goes_to_confirm():
 
 # ── CONFIRM state ─────────────────────────────────────────────────────────
 
-def test_advance_confirm_to_commit():
-    """CONFIRM 收「确认」→ COMMIT。"""
+def test_advance_confirm_to_commit(monkeypatch):
+    """CONFIRM 收「确认」→ 同一次 advance 内完成 commit → SUCCESS（commit 3b504db
+    设计：避免切到 STATE_COMMIT 等下一次 advance 时用户没发消息卡住）。
+    """
+    from car_tools import handlers as _h
+    from ocl.tool_guard import set_current_caller, CallerIdentity
+
+    class _FakeHandlers:
+        @staticmethod
+        def _commit_single_vehicle_reservation(args, **_):
+            return json.dumps({"vehicle_no": "PNV000", "vehicle_type": "DM2",
+                               "vehicle_type_detail": "DM0",
+                               "platform": "Xavier", "license_plate": "沪X000",
+                               "start_time": "2026-06-17 14:00",
+                               "end_time": "2026-06-17 16:00",
+                               "task_name": "MFF调试", "location": "上海"})
+
+    monkeypatch.setattr(_h, "_commit_single_vehicle_reservation",
+                        _FakeHandlers._commit_single_vehicle_reservation)
+    # _do_commit 会 set_current_caller + 调 identity.email_of；注入假身份免触发网络
+    set_current_caller(CallerIdentity(openid="ou_t13", email="t13@x.com"))
+    monkeypatch.setattr("ocl.identity.email_of", lambda uid: "t13@x.com")
+
     car_state.save("ou_t13", state="CONFIRM", vehicle_no="PNV000",
-                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   vehicle_type="DM2", vehicle_type_detail="DM0",
+                   chip="Xavier", duration_minutes=120,
+                   start_time="2026-06-17 14:00", end_time="2026-06-17 16:00",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00",
                    task_name="MFF调试", location="上海")
     new_state, resp = advance("ou_t13", "确认")
-    assert new_state == "COMMIT"
+    assert new_state == "SUCCESS"
+    assert "card" in resp
     car_state.clear("ou_t13")
 
 

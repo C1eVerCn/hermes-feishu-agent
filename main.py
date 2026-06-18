@@ -43,6 +43,14 @@ def _prewarm_agent_pool() -> None:
 
 
 def main() -> None:
+    # 2026-06-18: 注册 faulthandler，方便 SIGUSR1 dump stack 排查卡死
+    # （如 SELECT_FROM_LIST 在生产环境偶发 hang —— 之前没有 faulthandler 看不到）。
+    # 用 faulthandler.register(SIGUSR1) 而非默认 enable() —— 后者会每 5 分钟
+    # 自动 dump 一次到 stderr，污染 docker logs。显式 register 只在收到信号时触发。
+    import faulthandler
+    import signal
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
+
     # Wire root logger to stdout. Without this, `logging.getLogger(__name__)`
     # in bot/feishu/ocl has no handler attached and log.info/exception never
     # reach stdout (only lastResort at WARNING is used). `force=True` to

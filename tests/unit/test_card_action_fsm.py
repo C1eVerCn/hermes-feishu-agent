@@ -12,11 +12,14 @@ def setup():
     car_state.clear("ou_act")
 
 
-def test_fsm_select_button_translates_value_to_text():
-    """fsm_select 按钮：value='BM0' → advance('BM0') → SELECT_VEHICLE_TYPE 处理。
-    选车型细分后存到 vehicle_type_detail 字段，统一过 CONFIRM_CHIP。"""
+def test_fsm_select_type_translates_value_to_text():
+    """fsm_select_type（select_static 下拉选中车型）：value='BM0' → CONFIRM_CHIP。
+    2026-06-18 review finding 10：原 fsm_select 已无 caller（_type_card 改用
+    fsm_select_type），原测试是死代码；改为新 action 名 + value 模拟 select_static
+    回调（feishu/ws_client._extract_card_action 已归一化 option → value['value']）。
+    """
     car_state.save("ou_act", state="SELECT_VEHICLE_TYPE")
-    toast, card = card_action_handler.handle("ou_act", {"action": "fsm_select", "value": "BM0"})
+    toast, card = card_action_handler.handle("ou_act", {"action": "fsm_select_type", "value": "BM0"})
     pending = car_state.get("ou_act")
     assert pending.state == "CONFIRM_CHIP"
     assert pending.vehicle_type_detail == "BM0"
@@ -35,16 +38,6 @@ def test_fsm_select_chip_button():
     assert pending.chip == "Xavier"
     assert pending.duration_minutes == 30  # 默认 30 分钟
     car_state.clear("ou_act")
-
-
-def test_fsm_known_yes_button():
-    """fsm_known_yes 按钮：value-less → FSM 标记符 → DIRECT_BY_ID。"""
-    car_state.save("ou_act", state="SELECT_VEHICLE_TYPE")  # 用户刚点"不知道"后状态
-    toast, card = card_action_handler.handle("ou_act",
-                                              {"action": "fsm_known_yes"})
-    # 实际不会到这里（known_yes 只能从 START 状态进），但测一下 marker 翻译
-    # 注：fsm_known_yes 翻译为 marker，进 advance 后 START 会进 DIRECT_BY_ID
-    # 因为是 SELECT_VEHICLE_TYPE 状态，advance 走 else 分支
 
 
 def test_fsm_dur_confirm_with_no_vehicle_no():

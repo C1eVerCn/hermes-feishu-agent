@@ -44,9 +44,10 @@ def send_text_as_card(chat_id: str, text: str) -> None:
     a card — consistent visual style across all paths.
     """
     card = {
+        "schema": "2.0",
         "config": {"wide_screen_mode": True},
-        "elements": [{"tag": "div",
-                      "text": {"tag": "lark_md", "content": text}}],
+        "body": {"elements": [{"tag": "div",
+                                "text": {"tag": "lark_md", "content": text}}]},
     }
     send_card(chat_id, card)
 
