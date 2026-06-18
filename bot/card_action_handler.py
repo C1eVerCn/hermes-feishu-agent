@@ -23,12 +23,19 @@ log = logging.getLogger(__name__)
 # 卡片回调按钮的特殊文本标记（FSM 内部用）—— 无 value / 需特殊翻译
 # 全部集中在这里以便维护；每个 marker 对应 FSM 中的一类按钮
 # 2026-06-18 review 删 'fsm_direct_by_id'：orphan marker（FSM 中无 emit 端）。
+# 2026-06-18 增 'fsm_input_task_other' / 'fsm_input_location_other'：「其它」按钮
+# 走自定义输入路径（区别于普通按钮 value=MFF调试/上海 等）。
 _FSM_MARKERS = {
-    "fsm_known_yes":     "__fsm_known_yes__",
-    "fsm_known_no":      "__fsm_known_no__",
-    "fsm_dur_minus":     "__fsm_dur_minus__",
-    "fsm_dur_plus":      "__fsm_dur_plus__",
-    "fsm_dur_confirm":   "__fsm_dur_confirm__",
+    "fsm_known_yes":            "__fsm_known_yes__",
+    "fsm_known_no":             "__fsm_known_no__",
+    "fsm_dur_minus":            "__fsm_dur_minus__",
+    "fsm_dur_plus":             "__fsm_dur_plus__",
+    "fsm_dur_confirm":          "__fsm_dur_confirm__",
+    "fsm_input_task_other":     "__fsm_task_other__",
+    "fsm_input_location_other": "__fsm_location_other__",
+    # 2026-06-18 新增：SUCCESS 卡 [再约一辆] / [我的预约] 按钮
+    "fsm_done_more":            "__fsm_done_more__",
+    "fsm_done_records":         "__fsm_done_records__",
 }
 
 
@@ -124,6 +131,9 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     - 默认用 value 字段作为 text（"DM2" / "Xavier" / "1小时" 等）
     - fsm_pick_slot 带 slot_idx → 翻译为 "1" / "2" / "3"
     - fsm_direct_by_id 无 value → 用特殊标记符
+
+    2026-06-18 增：fsm_done_records 单独走 records 渲染（不进 FSM），
+    避免 FSM 返回 entry_card 后又被 records 覆盖导致用户看不懂。
     """
     action = value.get("action", "")
 
@@ -134,6 +144,39 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
         text = _FSM_MARKERS[action]
     else:
         text = str(value.get("value", ""))
+
+    # fsm_done_records：让用户看自己的预约（不进 FSM；FSM 只负责清 booking 状态）
+    if action == "fsm_done_records":
+        # 先清 booking state（FSM 在 advance 里清；这里直接调 advance 让它清）
+        car_booking_fsm.advance(open_id, _FSM_MARKERS["fsm_done_records"])
+        # 再渲染 records —— 走 fetch_user_reservation 工具
+        from car_tools.handlers import fetch_user_reservation
+        from ocl.tool_guard import set_current_caller, CallerIdentity
+        from ocl import identity as _ident
+        email = _ident.email_of(open_id)
+        set_current_caller(CallerIdentity(openid=open_id, email=email or ""))
+        try:
+            raw = fetch_user_reservation({})
+            result = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(result, dict) and "error" in result:
+                return (f"查询预约失败：{result['error']}", None)
+            items = (result.get("items") or result.get("data") or
+                     result.get("reservations") or [])
+            if not isinstance(items, list):
+                items = []
+            if not items:
+                return ("📋 暂无预约记录", {"text": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"})
+            lines = [f"📋 您共有 {len(items)} 条预约：\n"]
+            for r in items:
+                vno = r.get("vehicle_no") or r.get("车辆编号") or "?"
+                st = r.get("start_time") or r.get("开始时间") or "?"
+                et = r.get("end_time") or r.get("结束时间") or "?"
+                stt = r.get("status") or r.get("状态") or "未知"
+                lines.append(f"• {vno} {st} ~ {et}（{stt}）")
+            return ("📋 您的预约", {"text": "\n".join(lines)})
+        except Exception as e:
+            log.warning("fsm_done_records failed: %s", e)
+            return (f"查询预约失败：{e}", None)
 
     # 调 FSM 主入口
     new_state, response = car_booking_fsm.advance(open_id, text)

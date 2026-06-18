@@ -356,6 +356,77 @@ def test_advance_input_location_saves_and_goes_to_confirm():
     car_state.clear("ou_t12")
 
 
+# ── INPUT_TASK / INPUT_LOCATION 「其它」按钮路径 ────────────────────────────
+
+def test_advance_input_task_other_renders_text_prompt():
+    """INPUT_TASK 收「其它」marker → 渲染纯文本输入提示（不再展示按钮）。"""
+    from bot.car_booking_fsm import _FSM_TASK_OTHER_MARKER
+    car_state.save("ou_task_other", state="INPUT_TASK", vehicle_no="PNV000",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00")
+    new_state, resp = advance("ou_task_other", _FSM_TASK_OTHER_MARKER)
+    assert new_state == "INPUT_TASK"  # 保持状态
+    assert "请直接输入任务名称" in resp["text"]
+    # 不展示按钮（避免重复）
+    assert "buttons" not in resp or len(resp.get("buttons", [])) == 0
+    car_state.clear("ou_task_other")
+
+
+def test_advance_input_task_other_then_text_saves():
+    """INPUT_TASK 「其它」之后用户输入文本 → 写 task_name → INPUT_LOCATION。"""
+    from bot.car_booking_fsm import _FSM_TASK_OTHER_MARKER
+    car_state.save("ou_task_other2", state="INPUT_TASK", vehicle_no="PNV000",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00")
+    advance("ou_task_other2", _FSM_TASK_OTHER_MARKER)  # 触发「其它」
+    new_state, resp = advance("ou_task_other2", "我的自定义任务")
+    assert new_state == "INPUT_LOCATION"
+    pending = car_state.get("ou_task_other2")
+    assert pending.task_name == "我的自定义任务"
+    car_state.clear("ou_task_other2")
+
+
+def test_advance_input_location_other_renders_text_prompt():
+    """INPUT_LOCATION 收「其它」marker → 渲染纯文本输入提示。"""
+    from bot.car_booking_fsm import _FSM_LOCATION_OTHER_MARKER
+    car_state.save("ou_loc_other", state="INPUT_LOCATION", vehicle_no="PNV000",
+                   task_name="MFF调试",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00")
+    new_state, resp = advance("ou_loc_other", _FSM_LOCATION_OTHER_MARKER)
+    assert new_state == "INPUT_LOCATION"  # 保持状态
+    assert "请直接输入测试地点" in resp["text"]
+    car_state.clear("ou_loc_other")
+
+
+def test_advance_input_location_other_then_text_saves():
+    """INPUT_LOCATION 「其它」之后用户输入文本 → 写 location → CONFIRM。"""
+    from bot.car_booking_fsm import _FSM_LOCATION_OTHER_MARKER
+    car_state.save("ou_loc_other2", state="INPUT_LOCATION", vehicle_no="PNV000",
+                   task_name="MFF调试",
+                   time_range_start="2026-06-17 14:00",
+                   time_range_end="2026-06-17 16:00")
+    advance("ou_loc_other2", _FSM_LOCATION_OTHER_MARKER)
+    new_state, resp = advance("ou_loc_other2", "园区A3号楼")
+    assert new_state == "CONFIRM"
+    pending = car_state.get("ou_loc_other2")
+    assert pending.location == "园区A3号楼"
+    car_state.clear("ou_loc_other2")
+
+
+def test_task_hint_buttons_include_other():
+    """TASK_HINT_BUTTONS 必须包含「其它」+ 至少 3 个常用选项（4 项总计）。"""
+    from bot.car_booking_fsm import TASK_HINT_BUTTONS
+    assert "其它" in TASK_HINT_BUTTONS
+    assert len(TASK_HINT_BUTTONS) >= 4
+
+
+def test_location_buttons_match_spec():
+    """LOCATION_BUTTONS 必须包含 [上海, 塔山路, 创新港, 张江, 其它]。"""
+    from bot.car_booking_fsm import LOCATION_BUTTONS
+    assert LOCATION_BUTTONS == ["上海", "塔山路", "创新港", "张江", "其它"]
+
+
 # ── CONFIRM state ─────────────────────────────────────────────────────────
 
 def test_advance_confirm_to_commit(monkeypatch):
@@ -473,13 +544,42 @@ def test_advance_commit_error_returns_to_start(monkeypatch):
 
 # ── SUCCESS state ─────────────────────────────────────────────────────────
 
-def test_advance_success_clears_state():
-    """SUCCESS 收任何文本 → clear + 回 START。"""
+def test_advance_success_rerenders_card():
+    """SUCCESS 收空文本 → 重渲染成功卡（不再立即清状态）。
+
+    2026-06-18 改：原 SUCCESS→START 自动 clear；现改成等用户点 [再约一辆] /
+    [我的预约] 按钮才 clear。这给"再约一辆"快捷入口，避免重走 13 步。
+    """
     car_state.save("ou_t15", state="SUCCESS", vehicle_no="PNV000",
                    task_name="MFF调试")
     new_state, resp = advance("ou_t15", "")
+    assert new_state == "SUCCESS"  # 保持状态
+    assert "card" in resp  # 重渲染成功卡
+    # state 仍保留（等用户点 [再约一辆] 才清）
+    assert car_state.get("ou_t15") is not None
+    car_state.clear("ou_t15")
+
+
+def test_advance_success_done_more_clears_and_returns_to_start():
+    """SUCCESS 用户点 [再约一辆] → clear + 回 START。"""
+    from bot.car_booking_fsm import _FSM_DONE_MORE_MARKER
+    car_state.save("ou_t15b", state="SUCCESS", vehicle_no="PNV000",
+                   task_name="MFF调试")
+    new_state, resp = advance("ou_t15b", _FSM_DONE_MORE_MARKER)
     assert new_state == "START"
-    assert car_state.get("ou_t15") is None  # 清空
+    assert car_state.get("ou_t15b") is None  # 清空
+
+
+def test_advance_success_done_records_clears():
+    """SUCCESS 用户点 [我的预约] → clear + 回 START（records 由 handler.py 接管）。"""
+    from bot.car_booking_fsm import _FSM_DONE_RECORDS_MARKER
+    car_state.save("ou_t15c", state="SUCCESS", vehicle_no="PNV000",
+                   task_name="MFF调试")
+    new_state, resp = advance("ou_t15c", _FSM_DONE_RECORDS_MARKER)
+    # FSM 这边清状态回 START；具体 records 渲染由 card_action_handler /
+    # handler.py 接管（不进 FSM）
+    assert car_state.get("ou_t15c") is None  # 已清
+    car_state.clear("ou_t15c")
 
 
 # ── 端到端多轮 ─────────────────────────────────────────────────────────────

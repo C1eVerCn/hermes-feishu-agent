@@ -66,8 +66,10 @@ VEHICLE_TYPE_BUTTONS = [
 ]
 CHIP_BUTTONS = ["Xavier", "ADCU", "Orin", "Thor"]
 ENTRY_MODE_BUTTONS = ["已知编号", "帮我查"]
-TASK_HINT_BUTTONS = ["MFF调试", "路测", "数据采集"]
-LOCATION_BUTTONS = ["上海", "北京", "广州", "深圳"]
+TASK_HINT_BUTTONS = ["MFF调试", "路测", "数据采集", "其它"]
+# 2026-06-18 改：地点按钮精简到 4 个常用 + 1 个「其它」走自定义输入。
+# 新人友好：直接列常用地点 + 兜底自由输入（避免误判"不在列表里"）。
+LOCATION_BUTTONS = ["上海", "塔山路", "创新港", "张江", "其它"]
 
 # 时段候选上限（spec §5.2）—— 2026-06-18 改：用户希望看所有可用时段而非 3 个 mock 候选
 # 改成 6 个跨 24h（2 小时间隔），让用户有更多选择
@@ -87,6 +89,12 @@ _FSM_DUR_PLUS_MARKER = "__fsm_dur_plus__"
 _FSM_DUR_CONFIRM_MARKER = "__fsm_dur_confirm__"
 _FSM_KNOWN_YES_MARKER = "__fsm_known_yes__"
 _FSM_KNOWN_NO_MARKER = "__fsm_known_no__"
+# 「其它」按钮 → 自定义文本输入路径（2026-06-18 新增）
+_FSM_TASK_OTHER_MARKER = "__fsm_task_other__"
+_FSM_LOCATION_OTHER_MARKER = "__fsm_location_other__"
+# SUCCESS 卡快捷按钮 → 2026-06-18 新增
+_FSM_DONE_MORE_MARKER = "__fsm_done_more__"
+_FSM_DONE_RECORDS_MARKER = "__fsm_done_records__"
 
 
 def _format_duration(minutes: int) -> str:
@@ -95,6 +103,16 @@ def _format_duration(minutes: int) -> str:
         return f"{minutes} 分钟"
     h, m = divmod(minutes, 60)
     return f"{h} 小时" + (f" {m} 分钟" if m else "")
+
+
+# 「其它」按钮走特殊 action → card_action_handler 翻译成对应 marker → FSM 识别后
+# 渲染纯文本输入提示（不再展示示例按钮）。普通按钮用 fsm_input_task / fsm_input_location。
+def _fsm_input_task_action(value: str) -> str:
+    return "fsm_input_task_other" if value == "其它" else "fsm_input_task"
+
+
+def _fsm_input_location_action(value: str) -> str:
+    return "fsm_input_location_other" if value == "其它" else "fsm_input_location"
 
 
 def _card_wrap(body_elements: list[dict], *, wide: bool = True) -> dict:
@@ -130,16 +148,25 @@ def _card_wrap(body_elements: list[dict], *, wide: bool = True) -> dict:
 
 
 def _entry_card() -> dict:
-    """START 状态：入口卡。问"您是否知道要约的车辆编号？"，[知道] [不知道] 二选一。"""
+    """START 状态：入口卡。问"您是否知道要约的车辆编号？"，[知道] [不知道] 二选一。
+
+    2026-06-18 引导性增强：明确两条路径的预期行为（老用户/新人各选其一），
+    避免新人被"是否知道编号"卡住不知道选什么。
+    """
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md",
-         "content": "**🚗 车辆预约**\n是否知道要预约的车辆编号？"}},
+         "content": ("**🚗 车辆预约**\n\n"
+                     "📌 请选择您的约车方式：\n"
+                     "  • **知道** —— 您已确定要约哪辆车（记得编号如 SNV018）\n"
+                     "  • **不知道** —— 想先看看有哪些车可用\n\n"
+                     "💡 整个流程约 1 分钟完成（车型→芯片→时长→选车→时段→任务→地点→确认）\n"
+                     "🚪 任何步骤可说「算了/取消」随时退出")}},
         _button_row([
             {"tag": "button", "type": "primary",
-             "text": {"tag": "plain_text", "content": "知道"},
+             "text": {"tag": "plain_text", "content": "✅ 知道（报编号直接约）"},
              "value": {"action": "fsm_known_yes"}},
             {"tag": "button", "type": "default",
-             "text": {"tag": "plain_text", "content": "不知道"},
+             "text": {"tag": "plain_text", "content": "🔍 不知道（帮我查）"},
              "value": {"action": "fsm_known_no"}},
         ]),
     ])
@@ -167,9 +194,14 @@ def _select_card(title: str, placeholder: str, options: list, action: str) -> di
 
 
 def _type_card() -> dict:
-    """SELECT_VEHICLE_TYPE：单选下拉（替代原 15 个 button）。"""
+    """SELECT_VEHICLE_TYPE：单选下拉（替代原 15 个 button）。
+
+    2026-06-18 引导性增强：标题加步骤进度提示（第 1/8 步）+ 用途说明（按车型查车）。
+    """
     return _select_card(
-        "**🚗 车辆预约**\n请选择车型：",
+        ("**🚗 第 1/8 步：选择车型**\n\n"
+         "📋 列表是车辆型号细分（DM0/CT1/Acar 等），用于查询可用车辆\n"
+         "💡 不确定选哪个？选「DM0」（最常用的测试车）\n"),
         "点击选择车型",
         VEHICLE_TYPE_BUTTONS,
         "fsm_select_type",
@@ -178,10 +210,15 @@ def _type_card() -> dict:
 
 def _chip_card(vehicle_type_detail: str = "") -> dict:
     """CONFIRM_CHIP：单选下拉（4 个芯片）。vehicle_type_detail 用于标题回显
-    已选车型；review finding 1 修复：原 f-string `{''}` 永远空，现传真实值。"""
+    已选车型；review finding 1 修复：原 f-string `{''}` 永远空，现传真实值。
+
+    2026-06-18 引导性增强：加步骤进度 + 芯片平台用途说明 + 默认推荐。
+    """
     detail_suffix = f" {vehicle_type_detail}" if vehicle_type_detail else ""
     return _select_card(
-        f"**🧠 已选车型{detail_suffix}**\n请选择芯片平台：",
+        (f"**🧠 第 2/8 步：选择芯片平台**（已选车型{detail_suffix}）\n\n"
+         "🔧 芯片平台是车上的计算单元（Xavier/Orin 较新算力强；ADCU/Thor 专用场景）\n"
+         "💡 不确定选哪个？选「Xavier」（最常用、兼容性好）\n"),
         "点击选择芯片",
         CHIP_BUTTONS,
         "fsm_select_chip",
@@ -191,18 +228,17 @@ def _chip_card(vehicle_type_detail: str = "") -> dict:
 def _duration_card(pending) -> dict:
     """SELECT_DURATION：当前时长显示 + [-30] [+30] [确认] 按钮。
 
-    2026-06-18 修复：飞书 Card 2.0 button 的 disabled 字段不是所有客户端都支持，
-    灰按钮可能不渲染。改为：cur=MIN 时 −30 按钮文案变成 "0" 占位（也点击），
-    实际校验仍在 FSM 端（_advance_inner 的 fsm_dur_minus 分支判断 cur > MIN）。
-    简化：cur=MIN/MAX 时也显示按钮，文案始终 "−30 分"/"+30 分"；FSM 收到
-    dur_minus/dur_plus 时校验边界并提示"已到最小/最大"。
+    2026-06-18 引导性增强：加步骤进度 + 步进规则说明 + 范围限制。
     """
     cur = pending.duration_minutes if pending and pending.duration_minutes > 0 else DEFAULT_DURATION_MINUTES
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md",
-         "content": f"**⏱️ 用车时长**\n当前：**{_format_duration(cur)}** "
-                    f"（{_format_duration(MIN_DURATION_MINUTES)}~{_format_duration(MAX_DURATION_MINUTES)}，"
-                    f"{DURATION_STEP_MINUTES} 分步进）"}},
+         "content": (f"**⏱️ 第 3/8 步：选择用车时长**\n\n"
+                     f"📌 当前：**{_format_duration(cur)}**\n"
+                     f"📏 范围：{_format_duration(MIN_DURATION_MINUTES)} ~ {_format_duration(MAX_DURATION_MINUTES)} "
+                     f"（按 {DURATION_STEP_MINUTES} 分钟步进）\n"
+                     f"💡 用 [−30 分] / [+30 分] 调整时长，默认 30 分钟\n"
+                     f"✅ 调好后点 [确认] 进入下一步")}},
         _button_row([
             {"tag": "button", "type": "default",
              "text": {"tag": "plain_text", "content": "−30 分"},
@@ -211,7 +247,7 @@ def _duration_card(pending) -> dict:
              "text": {"tag": "plain_text", "content": "+30 分"},
              "value": {"action": "fsm_dur_plus"}},
             {"tag": "button", "type": "primary",
-             "text": {"tag": "plain_text", "content": "确认"},
+             "text": {"tag": "plain_text", "content": "✅ 确认"},
              "value": {"action": "fsm_dur_confirm"}},
         ]),
     ])
@@ -566,15 +602,24 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 避免"已选时长...请选车"误导用户，并给具体可换的芯片建议。
         # review finding 5 修复：alt_chips 用 CHIP_BUTTONS 而不是硬编码 4 元组，
         # 单一事实源，新增芯片时自动同步。
+        # 2026-06-18 引导性增强：加步骤进度 + 选车方式说明（按钮/报编号 二选一）。
         if vehicles_list:
-            text = f"已选时长 {pending_now.duration_minutes}分钟。请从下方车辆列表选车："
+            text = (f"**🚗 第 4/8 步：选择车辆**（共 {len(vehicles_list)} 辆可用）\n\n"
+                    f"📋 您可以：\n"
+                    f"  • 点下方 [选 N] 按钮快速选中（推荐新手）\n"
+                    f"  • 或直接报车辆编号（如 PNV001）\n"
+                    f"💡 时长：{pending_now.duration_minutes} 分钟")
         else:
             alt_chips = [c for c in CHIP_BUTTONS if c != pending_now.chip]
             text = (
-                f"📋 已选 {pending_now.vehicle_type_detail or pending_now.vehicle_type} · "
-                f"{pending_now.chip or '未选芯片'} 当前没有可用车辆。\n"
-                f"建议：换芯片平台（如 {alt_chips[0] if alt_chips else '其他芯片'}）"
-                f"或换个车型重新查。"
+                f"📋 **第 4/8 步：选择车辆**（暂无）\n\n"
+                f"❌ 已选 {pending_now.vehicle_type_detail or pending_now.vehicle_type} · "
+                f"{pending_now.chip or '未选芯片'} 当前没有可用车辆。\n\n"
+                f"💡 建议方案（按推荐度排序）：\n"
+                f"  ① 换芯片平台（如 {alt_chips[0] if alt_chips else '其他芯片'}）\n"
+                f"  ② 换个车型重新查\n"
+                f"  ③ 换个时长试试\n\n"
+                f"🚪 说「算了/取消」可退出本次约车"
             )
         return STATE_SELECT_FROM_LIST, {
             "text": text,
@@ -592,7 +637,9 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                 pending_dc.vehicle_no, pending_dc.duration_minutes)
             if not slots:
                 return STATE_SELECT_TIME, {
-                    "text": "请选预设时间：",
+                    "text": ("**⏰ 第 5/8 步：选择时段**（预设时间）\n\n"
+                             "📋 该车辆当前没有连续可用时段，请选下面 4 个预设时间之一：\n"
+                             "💡 或返回上一步换辆车"),
                     "buttons": [{"text": s, "value": {"action": "fsm_select_time", "value": s}}
                                 for s in ["1小时后", "2小时后", "明早9点", "明天下午2点"]],
                 }
@@ -600,9 +647,13 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             # 按钮在窄屏上溢出）。option 文本是 "MM-DD HH:MM ~ HH:MM"，value 是
             # 完整 start_time 字符串（card_action_handler 不再需要特殊翻译）。
             return STATE_DURATION_CONFIRM, {
-                "text": f"已选车辆 {pending_dc.vehicle_no}。请选时段：",
+                "text": (f"**⏰ 第 5/8 步：选择用车时段**\n\n"
+                         f"📋 已选车辆：**{pending_dc.vehicle_no}**\n"
+                         f"⏱️ 用车时长：{_format_duration(pending_dc.duration_minutes)}\n"
+                         f"💡 下方下拉显示从「现在 + 30 分钟」起的 {len(slots)} 个候选时段\n"
+                         f"   选中后时段会标在调度系统里"),
                 "card": _select_card(
-                    title=f"⏰ 时段选项（{pending_dc.vehicle_no}）",
+                    title=f"⏰ 第 5/8 步：选择时段（{pending_dc.vehicle_no}）",
                     placeholder="点击选择时段",
                     options=[s["start"] for s in slots],
                     action="fsm_pick_slot",
@@ -614,7 +665,11 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             if not chosen:
                 n = len(pending_dc.last_vehicles or [])
                 return STATE_DURATION_CONFIRM, {
-                    "text": f"未识别车辆「{text}」。请选编号（1-{n}）或报车辆编号：",
+                    "text": (f"❌ 未识别车辆「{text}」。\n\n"
+                             f"💡 您可以：\n"
+                             f"  • 点击下方车辆卡上的 [选 N] 按钮（推荐新手）\n"
+                             f"  • 或直接报车辆编号（1-{n} 的序号 / PNVxxx 完整编号）\n"
+                             f"🚪 说「算了」可返回车型选择"),
                 }
             car_state.save(user_id,
                            vehicle_no=chosen.get("vehicle_no", ""),
@@ -624,15 +679,17 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             slots = _match_slots(chosen.get("vehicle_no", ""), pending_dc.duration_minutes)
             if not slots:
                 return STATE_SELECT_TIME, {
-                    "text": f"未找到 {pending_dc.duration_minutes} 分钟连续可用时段，"
-                            f"请选预设时间或换车：",
+                    "text": (f"⚠️ 未找到 {_format_duration(pending_dc.duration_minutes)} 连续可用时段\n\n"
+                             f"📋 请选下面 4 个预设时间之一，或换辆车："),
                     "buttons": [{"text": s, "value": {"action": "fsm_select_time", "value": s}}
                                 for s in ["1小时后", "2小时后", "明早9点", "明天下午2点"]]
                 }
             # 缓存候选时段到 car_state（用户后续 "选1" / "选2" / "选3" 反查）
             car_state.save(user_id, last_slots=slots)
             return STATE_DURATION_CONFIRM, {
-                "text": f"已选 {chosen.get('vehicle_no','')}。请选时段：",
+                "text": (f"**⏰ 第 5/8 步：选择时段**\n\n"
+                         f"✅ 已选车辆：**{chosen.get('vehicle_no','')}**\n"
+                         f"💡 下方按钮是候选时段（按时间段展示）"),
                 "buttons": [{"text": s["label"],
                              "value": {"action": "fsm_pick_slot", "slot_idx": i + 1}}
                             for i, s in enumerate(slots)]
@@ -642,8 +699,11 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         slot = _resolve_slot_from_text(text, slots)
         if not slot:
             return STATE_DURATION_CONFIRM, {
-                "text": f"未识别时段「{text}」。请选 1-{len(slots)} 或报起止时间：\n"
-                        f"（若想取消本次约车改查其他，请说「算了」/「取消」/「退出」）",
+                "text": (f"❌ 未识别时段「{text}」。\n\n"
+                         f"💡 您可以：\n"
+                         f"  • 点 1-{len(slots)} 序号\n"
+                         f"  • 或报起止时间（如「14:00-16:00」）\n"
+                         f"🚪 说「算了/取消/退出」可放弃本次约车"),
                 "buttons": [{"text": s["label"],
                              "value": {"action": "fsm_pick_slot", "slot_idx": i + 1}}
                             for i, s in enumerate(slots)]
@@ -654,8 +714,13 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                        start_time=slot["start"],
                        end_time=slot["end"])
         return STATE_INPUT_TASK, {
-            "text": f"已选时段 {slot['start']} ~ {slot['end']}。请输入任务名称：",
-            "buttons": [{"text": t, "value": {"action": "fsm_input_task", "value": t}}
+            "text": (f"**📝 第 6/8 步：输入任务名称**\n\n"
+                     f"✅ 已选时段：**{slot['start']} ~ {slot['end']}**\n\n"
+                     f"💡 您可以：\n"
+                     f"  • 点击下方常用任务快速填入（推荐新手）\n"
+                     f"  • 或直接输入自己的任务名称\n"
+                     f"  • 点「其它」可跳过示例自由输入"),
+            "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
                         for t in TASK_HINT_BUTTONS]
         }
 
@@ -676,8 +741,13 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
                                start_time=s["start"],
                                end_time=s["end"])
         return STATE_INPUT_TASK, {
-            "text": "已记录时段。请输入任务名称：",
-            "buttons": [{"text": t, "value": {"action": "fsm_input_task", "value": t}}
+            "text": (f"**📝 第 6/8 步：输入任务名称**\n\n"
+                     f"✅ 时段已记录\n\n"
+                     f"💡 您可以：\n"
+                     f"  • 点击下方常用任务快速填入（推荐新手）\n"
+                     f"  • 或直接输入自己的任务名称\n"
+                     f"  • 点「其它」可跳过示例自由输入"),
+            "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
                         for t in TASK_HINT_BUTTONS]
         }
 
@@ -686,7 +756,9 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         vehicle_no = text.strip().upper()
         if not _VEHICLE_NO_RE.match(vehicle_no):
             return STATE_DIRECT_BY_ID, {
-                "text": f"编号格式不符「{vehicle_no}」，应为字母+数字（如 SNV018 / PNV000）。请重输：",
+                "text": (f"❌ 编号格式不符「{vehicle_no}」\n\n"
+                         f"💡 正确格式：字母+数字（如 SNV018 / PNV000）\n"
+                         f"🚪 说「算了/取消」可返回车型选择"),
             }
         car_state.save(user_id, vehicle_no=vehicle_no)
         pending_now = car_state.get(user_id)
@@ -696,29 +768,53 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
 
     # INPUT_TASK：LLM 抽 taskName（spec §3.4 ④；spec §4.2 prompt 不补全）
     if current_state == STATE_INPUT_TASK:
+        # 2026-06-18 引导性增强：用户点「其它」按钮 → 走自定义输入路径，
+        # 渲染纯文本提示（不再展示示例按钮，避免重复）。
+        if text == _FSM_TASK_OTHER_MARKER:
+            return STATE_INPUT_TASK, {
+                "text": "✍️ 请直接输入任务名称（可中文/英文，如「MFF 调试」「路测 03 园区」）",
+            }
         task = _llm_extract_task(text)["task_name"]
         if not task:
             return STATE_INPUT_TASK, {
-                "text": "任务名称不能为空，请重新输入或选下面的示例：\n"
-                        f"（若想取消本次约车，请说「算了」/「取消」/「退出」）",
-                "buttons": [{"text": t, "value": {"action": "fsm_input_task", "value": t}}
+                "text": "❓ 任务名称不能为空。\n"
+                        "💡 您可以：\n"
+                        "  • 点击下方示例快速填入（推荐新手）\n"
+                        "  • 或直接输入自己的任务名称\n"
+                        "  • 点「其它」可跳过示例自由输入\n"
+                        "🚪 若想取消本次约车，请说「算了」/「取消」/「退出」",
+                "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
                             for t in TASK_HINT_BUTTONS]
             }
         car_state.save(user_id, task_name=task)
         return STATE_INPUT_LOCATION, {
-            "text": f"任务：{task}。请输入测试地点（可点击示例或直接输入）：",
-            "buttons": [{"text": c, "value": {"action": "fsm_input_location", "value": c}}
+            "text": f"✅ 任务已记录：**{task}**\n\n"
+                    f"📍 第 7/8 步：请输入测试地点\n"
+                    f"💡 您可以：\n"
+                    f"  • 点击下方常用地点快速填入\n"
+                    f"  • 或直接输入自己的地点\n"
+                    f"  • 点「其它」可跳过列表自由输入",
+            "buttons": [{"text": c, "value": {"action": _fsm_input_location_action(c)}}
                         for c in LOCATION_BUTTONS]
         }
 
     # INPUT_LOCATION：LLM 抽 location
     if current_state == STATE_INPUT_LOCATION:
+        # 2026-06-18 引导性增强：用户点「其它」按钮 → 走自定义输入路径。
+        if text == _FSM_LOCATION_OTHER_MARKER:
+            return STATE_INPUT_LOCATION, {
+                "text": "✍️ 请直接输入测试地点（中文/英文均可，如「园区A3 号楼」「上海临港」）",
+            }
         loc = _llm_extract_location(text)["location"]
         if not loc:
             return STATE_INPUT_LOCATION, {
-                "text": "地点不能为空，请重新输入或选下面的示例：\n"
-                        f"（若想取消本次约车，请说「算了」/「取消」/「退出」）",
-                "buttons": [{"text": c, "value": {"action": "fsm_input_location", "value": c}}
+                "text": "❓ 地点不能为空。\n"
+                        "💡 您可以：\n"
+                        "  • 点击下方常用地点快速填入（推荐新手）\n"
+                        "  • 或直接输入自己的地点\n"
+                        "  • 点「其它」可跳过列表自由输入\n"
+                        "🚪 若想取消本次约车，请说「算了」/「取消」/「退出」",
+                "buttons": [{"text": c, "value": {"action": _fsm_input_location_action(c)}}
                             for c in LOCATION_BUTTONS]
             }
         car_state.save(user_id, location=loc)
@@ -737,16 +833,24 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             return STATE_START, _entry_card()
         if text_clean == "修改":
             return STATE_INPUT_TASK, {
-                "text": "请重新输入任务名称：",
-                "buttons": [{"text": t, "value": {"action": "fsm_input_task", "value": t}}
+                "text": ("✏️ 请重新输入任务名称\n\n"
+                         "💡 您可以：\n"
+                         "  • 点击下方常用任务快速填入\n"
+                         "  • 或直接输入新的任务名称\n"
+                         "  • 点「其它」可跳过示例自由输入"),
+                "buttons": [{"text": t, "value": {"action": _fsm_input_task_action(t)}}
                             for t in TASK_HINT_BUTTONS]
             }
         return STATE_CONFIRM, {
-            "text": "请选择：确认 / 修改 / 取消",
+            "text": ("❓ 请选择下一步操作：\n\n"
+                     "  • ✅ **确认** —— 提交预约，等待调度员审批\n"
+                     "  • ✏️ **修改** —— 重新填任务名称\n"
+                     "  • ❌ **取消** —— 放弃本次约车\n\n"
+                     "⏰ 10 分钟内未确认将自动作废"),
             "buttons": [
-                {"text": "确认", "value": {"action": "fsm_confirm", "value": "确认"}},
-                {"text": "修改", "value": {"action": "fsm_confirm", "value": "修改"}},
-                {"text": "取消", "value": {"action": "fsm_confirm", "value": "取消"}},
+                {"text": "✅ 确认", "value": {"action": "fsm_confirm", "value": "确认"}},
+                {"text": "✏️ 修改", "value": {"action": "fsm_confirm", "value": "修改"}},
+                {"text": "❌ 取消", "value": {"action": "fsm_confirm", "value": "取消"}},
             ]
         }
 
@@ -754,54 +858,91 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     if current_state == STATE_COMMIT:
         return _do_commit(user_id)
 
-    # SUCCESS：终态；不响应任何输入（清状态回 START）
+    # SUCCESS：终态
     if current_state == STATE_SUCCESS:
-        car_state.clear(user_id)
-        return STATE_START, _entry_card()
+        # 2026-06-18 引导性增强：SUCCESS 不再立即清状态回 START —— 等用户看完摘要
+        # 点 [再约一辆] / [我的预约] 才清。给"再约一辆"快捷路径，避免重走 13 步。
+        # fsm_done_more → 清状态回 START（再走一遍）
+        # fsm_done_records → 由 card_action_handler 直接分发到 records 查询（不走 FSM）
+        if text == _FSM_DONE_MORE_MARKER:
+            car_state.clear(user_id)
+            return STATE_START, _entry_card()
+        if text == _FSM_DONE_RECORDS_MARKER:
+            car_state.clear(user_id)
+            return STATE_START, _entry_card()  # 也回 START，让 records 自然分发
+        # 默认：重渲染成功卡（用户点其他按钮或发文本时不变）
+        return STATE_SUCCESS, _success_card(user_id)
 
     raise NotImplementedError(f"FSM state handler not implemented: {current_state}")
 
 
 def _confirm_card(user_id: str) -> dict:
-    """CONFIRM 状态：二次确认卡。"""
+    """CONFIRM 状态：二次确认卡。
+
+    2026-06-18 引导性增强：加步骤进度 + 字段高亮（车牌号/调度规则）+ 后续动作说明。
+    """
     from bot import car_state
     p = car_state.get(user_id)
     summary = (
-        f"**请确认预约信息：**\n\n"
-        f"车辆编号：{p.vehicle_no}\n"
-        f"车型：{p.vehicle_type or '-'} · {p.chip or '-'} 芯片\n"
-        f"时间：{p.time_range_start} ~ {p.time_range_end}\n"
-        f"任务：{p.task_name}\n"
-        f"地点：{p.location}"
+        f"**📋 第 8/8 步：最终确认**\n\n"
+        f"🚗 **车辆信息**\n"
+        f"  • 编号：**{p.vehicle_no}**（车牌：{p.license_plate or '-'}）\n"
+        f"  • 车型：{p.vehicle_type or '-'} · {p.chip or '-'} 芯片\n\n"
+        f"⏱️ **时间安排**\n"
+        f"  • 时段：**{p.time_range_start} ~ {p.time_range_end}**\n"
+        f"  • 时长：{_format_duration(p.duration_minutes)}\n\n"
+        f"📝 **任务信息**\n"
+        f"  • 任务：{p.task_name}\n"
+        f"  • 地点：{p.location}\n\n"
+        f"📨 提交后将自动通知调度员审批，通常 10-30 分钟内有结果\n"
+        f"⏰ 10 分钟内未点确认，本次预约自动作废"
     )
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md", "content": summary}},
         _button_row([
             {"tag": "button", "type": "primary",
-             "text": {"tag": "plain_text", "content": "确认"},
+             "text": {"tag": "plain_text", "content": "✅ 确认提交"},
              "value": {"action": "fsm_confirm", "value": "确认"}},
             {"tag": "button", "type": "default",
-             "text": {"tag": "plain_text", "content": "修改"},
+             "text": {"tag": "plain_text", "content": "✏️ 修改任务"},
              "value": {"action": "fsm_confirm", "value": "修改"}},
             {"tag": "button", "type": "danger",
-             "text": {"tag": "plain_text", "content": "取消"},
+             "text": {"tag": "plain_text", "content": "❌ 取消"},
              "value": {"action": "fsm_confirm", "value": "取消"}},
         ])
     ])
 
 
 def _success_card(user_id: str) -> dict:
-    """SUCCESS 状态：成功卡。"""
+    """SUCCESS 状态：成功卡。
+
+    2026-06-18 引导性增强：加审批 SLA 说明 + 后续动作快捷入口（[再约一辆] / [我的预约]）。
+    不再立即清状态回 START —— 等用户看完摘要点快捷按钮才清。
+    """
     from bot import car_state
     p = car_state.get(user_id)
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md",
-         "content": f"**✅ 预约提交成功，等待调度员审批**\n\n"
-                    f"车辆编号：{p.vehicle_no}\n"
-                    f"车型：{p.vehicle_type or '-'} · {p.chip or '-'} 芯片\n"
-                    f"时间：{p.start_time} ~ {p.end_time}\n"
-                    f"任务：{p.task_name}\n"
-                    f"地点：{p.location}"}}
+         "content": (f"**🎉 预约提交成功！**\n\n"
+                     f"📋 **预约信息**\n"
+                     f"  • 车辆编号：**{p.vehicle_no}**\n"
+                     f"  • 车型：{p.vehicle_type or '-'} · {p.chip or '-'} 芯片\n"
+                     f"  • 时段：{p.start_time} ~ {p.end_time}\n"
+                     f"  • 任务：{p.task_name}\n"
+                     f"  • 地点：{p.location}\n\n"
+                     f"📨 调度员会收到通知，通常 10-30 分钟内审批\n"
+                     f"💡 您可以：\n"
+                     f"  • 约另一辆车（点下方 [再约一辆]）\n"
+                     f"  • 查看我的所有预约（点下方 [我的预约]）\n"
+                     f"  • 审批结果会通过本对话通知您")}},
+        _button_row([
+            {"tag": "button", "type": "primary",
+             "text": {"tag": "plain_text", "content": "🚗 再约一辆"},
+             "value": {"action": "fsm_done_more"}},
+            {"tag": "button", "type": "default",
+             "text": {"tag": "plain_text", "content": "📋 我的预约"},
+             "value": {"action": "fsm_done_records"}},
+        ]),
     ])
 
 
