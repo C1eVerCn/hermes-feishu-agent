@@ -21,9 +21,10 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      # 上游 fmp 车辆预约后端地址（dmz-fmp-mcp 容器在 docker_fmp-net 网络中）
-      CAR_API_BASE_URL: http://dmz-fmp-mcp:9015
-      CAR_API_PREFIX: /fmp/vehicleReservation
+      # 上游 fmp-mcp 服务的 SSE MCP 端点（dmz-fmp-mcp 容器在 docker_fmp-net 网络中）
+      # booking_mcp_server 用 Python mcp 包通过 SSE+JSON-RPC 调上游 8 个 @Tool
+      CAR_MCP_SSE_URL: http://dmz-fmp-mcp:9015/fmpMCP/sse
+      CAR_MCP_TIMEOUT: "80"
     volumes:
       # 整个项目源码挂载——避免每次改代码都要重建 image
       - ./:/app
