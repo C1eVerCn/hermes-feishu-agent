@@ -200,8 +200,7 @@ def _type_card() -> dict:
     """
     return _select_card(
         ("**🚗 第 1/8 步：选择车型**\n\n"
-         "📋 列表是车辆型号细分（DM0/CT1/Acar 等），用于查询可用车辆\n"
-         "💡 不确定选哪个？选「DM0」（最常用的测试车）\n"),
+         "📋 列表是车辆型号细分（DM0/CT1/Acar 等），用于查询可用车辆\n"),
         "点击选择车型",
         VEHICLE_TYPE_BUTTONS,
         "fsm_select_type",
@@ -212,13 +211,12 @@ def _chip_card(vehicle_type_detail: str = "") -> dict:
     """CONFIRM_CHIP：单选下拉（4 个芯片）。vehicle_type_detail 用于标题回显
     已选车型；review finding 1 修复：原 f-string `{''}` 永远空，现传真实值。
 
-    2026-06-18 引导性增强：加步骤进度 + 芯片平台用途说明 + 默认推荐。
+    2026-06-18 引导性增强：加步骤进度 + 芯片平台用途说明。
     """
     detail_suffix = f" {vehicle_type_detail}" if vehicle_type_detail else ""
     return _select_card(
         (f"**🧠 第 2/8 步：选择芯片平台**（已选车型{detail_suffix}）\n\n"
-         "🔧 芯片平台是车上的计算单元（Xavier/Orin 较新算力强；ADCU/Thor 专用场景）\n"
-         "💡 不确定选哪个？选「Xavier」（最常用、兼容性好）\n"),
+         "🔧 芯片平台是车上的计算单元（Xavier/Orin 较新算力强；ADCU/Thor 专用场景）\n"),
         "点击选择芯片",
         CHIP_BUTTONS,
         "fsm_select_chip",
