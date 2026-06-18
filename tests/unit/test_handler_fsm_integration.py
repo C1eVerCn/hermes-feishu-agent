@@ -98,21 +98,21 @@ def test_in_pending_state_continues_fsm(setup):
     """在挂起状态时收到任意文本 → FSM 继续推进。"""
     car_state.save("ou_int", state="SELECT_VEHICLE_TYPE", vehicle_type="",
                    chip="")
-    handler._handle(_event("大F车", "m2"))
+    handler._handle(_event("Bcar", "m2"))
     pending = car_state.get("ou_int")
-    # 大F车是多芯片 → 应该进 CONFIRM_CHIP 或 VEHICLE_ENTRY
-    assert pending.state in ("CONFIRM_CHIP", "VEHICLE_ENTRY")
+    # Bcar → 统一过 CONFIRM_CHIP
+    assert pending.state == "CONFIRM_CHIP"
 
 
 def test_select_vehicle_type_chip_confirm_chains_to_entry(setup):
     """车型 + 芯片 + 时长 一路走下来（新流程：直接进 SELECT_DURATION，无 VEHICLE_ENTRY）。"""
-    # 选车型（大F车 → 多芯片）
+    # 选车型（Bcar）
     car_state.save("ou_int", state="SELECT_VEHICLE_TYPE")
-    handler._handle(_event("大F车", "m2"))
+    handler._handle(_event("Bcar", "m2"))
     pending = car_state.get("ou_int")
     assert pending.state == "CONFIRM_CHIP"
     # 选芯片
-    handler._handle(_event("Xavier", "m3"))
+    handler._handle(_event("Orin", "m3"))
     pending = car_state.get("ou_int")
     # 新流程：芯片确认后直接进 SELECT_DURATION（不再经过 VEHICLE_ENTRY）
     assert pending.state == "SELECT_DURATION"

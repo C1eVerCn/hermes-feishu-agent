@@ -45,7 +45,9 @@ ALL_STATES = frozenset({
 
 
 # ── 按钮定义（spec §3.3） ─────────────────────────────────────────────────
-VEHICLE_TYPE_BUTTONS = ["DM2", "CT1", "大F车", "CM0", "BM2"]
+# 车型按钮：fmp-app common_dictionary VEHICLE_TYPE 大类（vehicle 表的 vehicle_type 列存的是大类）
+# 数据来自 fmp-mysql.common_dictionary WHERE type_code='VEHICLE_TYPE' AND del_flag=0
+VEHICLE_TYPE_BUTTONS = ["427", "Acar", "Bcar", "Ccar", "Dcar", "?Fcar"]
 CHIP_BUTTONS = ["Xavier", "ADCU", "Orin", "Thor"]
 ENTRY_MODE_BUTTONS = ["已知编号", "帮我查"]
 TASK_HINT_BUTTONS = ["MFF调试", "路测", "数据采集"]

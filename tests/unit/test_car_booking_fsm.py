@@ -48,7 +48,7 @@ def test_advance_start_returns_entry_card():
 def test_advance_select_vehicle_type_button():
     """SELECT_VEHICLE_TYPE 收车型按钮 → 统一进 CONFIRM_CHIP（用户偏好：选完车型再选芯片）。"""
     car_state.save("ou_t2", state="SELECT_VEHICLE_TYPE")
-    new_state, resp = advance("ou_t2", "大F车")
+    new_state, resp = advance("ou_t2", "Bcar")
     assert new_state == "CONFIRM_CHIP"
 
 
