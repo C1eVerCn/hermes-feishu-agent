@@ -102,6 +102,7 @@ mcp = FastMCP("car_booking")
 
 
 # ── 1. get_user_context ────────────────────────────────────────────────────
+# Java @Tool arg0=emailAddress
 
 @mcp.tool()
 def get_user_context(emailAddress: str = "") -> dict:
@@ -115,6 +116,7 @@ def get_user_context(emailAddress: str = "") -> dict:
 
 
 # ── 2. get_common_dictionary ───────────────────────────────────────────────
+# Java @Tool arg0=typeCode
 
 @mcp.tool()
 def get_common_dictionary(typeCode: str = "") -> dict:
@@ -128,7 +130,9 @@ def get_common_dictionary(typeCode: str = "") -> dict:
 
 
 # ── 3. fetch_available_vehicles ────────────────────────────────────────────
-# Java 参数顺序：emailAddress, vehicleType, vehicleTypeDetail, project, platform, startTime, endTime
+# Java @Tool arg 顺序（从 fmp-mcp log 验证）：
+# arg0=emailAddress, arg1=vehicleType, arg2=vehicleTypeDetail, arg3=project,
+# arg4=platform, arg5=startTime, arg6=endTime
 
 @mcp.tool()
 def fetch_available_vehicles(
@@ -154,8 +158,9 @@ def fetch_available_vehicles(
 
 
 # ── 4. single_vehicle_reservation ──────────────────────────────────────────
-# Java 参数顺序：emailAddress, startTime, endTime, taskName, location,
-#                vehicleNo, vin, remark, vehicleType, platform
+# Java @Tool arg 顺序（从 fmp-mcp log 验证）：
+# arg0=startTime, arg1=endTime, arg2=vehicleNo, arg3=vin, arg4=emailAddress,
+# arg5=taskName, arg6=location, arg7=remark
 
 @mcp.tool()
 def single_vehicle_reservation(
@@ -181,14 +186,17 @@ def single_vehicle_reservation(
         return {"code": 400, "message": "emailAddress 为必填参数", "data": None}
     if not vehicleNo and not vin:
         return {"code": 400, "message": "vehicleNo 和 vin 至少提供一个", "data": None}
+    # Java @Tool 顺序：startTime, endTime, vehicleNo, vin, emailAddress,
+    #                   taskName, location, remark
     return _call_fmp_tool_args("single_vehicle_reservation", [
-        emailAddress, startTime, endTime, taskName, location,
-        vehicleNo, vin, remark, vehicleType, platform,
+        startTime, endTime, vehicleNo, vin, emailAddress,
+        taskName, location, remark,
     ])
 
 
 # ── 5. cancel_vehicle_reservation ──────────────────────────────────────────
-# Java 参数顺序：emailAddress, vehicleNo, vin, reservationId
+# Java @Tool arg 顺序（从 fmp-mcp log 验证）：
+# arg0=vehicleNo, arg1=vin, arg2=emailAddress, arg3=reservationId
 
 @mcp.tool()
 def cancel_vehicle_reservation(
@@ -202,13 +210,16 @@ def cancel_vehicle_reservation(
         return {"code": 400, "message": "emailAddress 为必填参数", "data": None}
     if not vehicleNo and not vin:
         return {"code": 400, "message": "vehicleNo 和 vin 至少提供一个", "data": None}
+    # Java 顺序：vehicleNo, vin, emailAddress, reservationId
     return _call_fmp_tool_args("cancel_vehicle_reservation", [
-        emailAddress, vehicleNo, vin, reservationId,
+        vehicleNo, vin, emailAddress, reservationId,
     ])
 
 
 # ── 6. approval_vehicle_reservation ────────────────────────────────────────
-# Java 参数顺序：emailAddress, reviewerStatus, vehicleNo, vin, reviewerRemark, reservationId
+# Java @Tool arg 顺序（从 fmp-mcp log 验证）：
+# arg0=vehicleNo, arg1=vin, arg2=emailAddress, arg3=reviewerStatus (int),
+# arg4=reviewerRemark, arg5=reservationId
 
 @mcp.tool()
 def approval_vehicle_reservation(
@@ -236,15 +247,18 @@ def approval_vehicle_reservation(
     if effective_status not in (1, 2):
         return {"code": 400, "message": "reviewerStatus 只能是 1(批准) 或 2(拒绝)", "data": None}
     effective_remark = reviewerRemark or reviewComment
+    # Java 顺序：vehicleNo, vin, emailAddress, reviewerStatus, reviewerRemark, reservationId
     return _call_fmp_tool_args("approval_vehicle_reservation", [
-        emailAddress, effective_status, effective_vehicle, vin,
+        effective_vehicle, vin, emailAddress, effective_status,
         effective_remark, reservationId,
     ])
 
 
 # ── 7. return_vehicle ──────────────────────────────────────────────────────
-# Java 参数顺序：emailAddress, returnLocation, keyPosition, changeModule,
-#                vehicleStatus, vehicleStatusDescription, vehicleNo, vin
+# Java @Tool arg 顺序（从 fmp-mcp log 验证）：
+# arg0=vehicleNo, arg1=vin, arg2=emailAddress, arg3=returnLocation,
+# arg4=keyPosition, arg5=changeModule, arg6=vehicleStatus (int),
+# arg7=vehicleStatusDescription
 
 @mcp.tool()
 def return_vehicle(
@@ -265,14 +279,18 @@ def return_vehicle(
         return {"code": 400, "message": "emailAddress 为必填参数", "data": None}
     if not vehicleNo and not vin:
         return {"code": 400, "message": "vehicleNo 和 vin 至少提供一个", "data": None}
+    # Java 顺序：vehicleNo, vin, emailAddress, returnLocation, keyPosition,
+    #            changeModule, vehicleStatus, vehicleStatusDescription
     return _call_fmp_tool_args("return_vehicle", [
-        emailAddress, returnLocation, keyPosition, changeModule,
-        vehicleStatus, vehicleStatusDescription, vehicleNo, vin,
+        vehicleNo, vin, emailAddress, returnLocation, keyPosition,
+        changeModule, vehicleStatus, vehicleStatusDescription,
     ])
 
 
 # ── 8. fetch_user_reservation ──────────────────────────────────────────────
-# Java 参数顺序：emailAddress, startTime, endTime, vehicleNo, vin, taskName, status
+# Java @Tool arg 顺序（从 fmp-mcp log 验证）：
+# arg0=startTime, arg1=endTime, arg2=vehicleNo, arg3=vin, arg4=emailAddress,
+# arg5=taskName, arg6=status (Integer)
 
 @mcp.tool()
 def fetch_user_reservation(
@@ -287,13 +305,16 @@ def fetch_user_reservation(
     """查询指定用户的历史预约记录。"""
     if not emailAddress:
         return {"code": 400, "message": "emailAddress 为必填参数", "data": None}
+    # Java 顺序：startTime, endTime, vehicleNo, vin, emailAddress, taskName, status
     return _call_fmp_tool_args("fetch_user_reservation", [
-        emailAddress, startTime, endTime, vehicleNo, vin, taskName, status,
+        startTime, endTime, vehicleNo, vin, emailAddress, taskName, status,
     ])
 
 
 # ── 9. fetch_user_approval ─────────────────────────────────────────────────
-# Java 参数顺序：emailAddress, startTime, endTime, vehicleNo, vin, taskName, status
+# Java @Tool arg 顺序（与 fetchUserReservation 一致）：
+# arg0=startTime, arg1=endTime, arg2=vehicleNo, arg3=vin, arg4=emailAddress,
+# arg5=taskName, arg6=status (Integer)
 
 @mcp.tool()
 def fetch_user_approval(
@@ -308,8 +329,9 @@ def fetch_user_approval(
     """调度员/管理员查询归属自己审批的预约任务列表。"""
     if not emailAddress:
         return {"code": 400, "message": "emailAddress 为必填参数", "data": None}
+    # Java 顺序：startTime, endTime, vehicleNo, vin, emailAddress, taskName, status
     return _call_fmp_tool_args("fetch_user_approval", [
-        emailAddress, startTime, endTime, vehicleNo, vin, taskName, status,
+        startTime, endTime, vehicleNo, vin, emailAddress, taskName, status,
     ])
 
 
