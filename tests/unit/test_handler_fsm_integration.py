@@ -84,12 +84,13 @@ def setup(monkeypatch):
 
 
 def test_booking_intent_enters_fsm(setup):
-    """表达"约车"意图 → 进 FSM（返回 SELECT_VEHICLE_TYPE 入口）。"""
+    """表达"约车"意图 → 进 FSM（返回入口卡，知道/不知道按钮）。"""
+    car_state.clear("ou_int")
     handler._handle(_event("我想约车", "m1"))
     pending = car_state.get("ou_int")
-    assert pending is not None
-    assert pending.state == "SELECT_VEHICLE_TYPE"
-    # 至少有一次 send（入口卡 + text）
+    # 入口卡 state 保持 START（advance() 不持久化 START，让 marker 回调仍走 START 分支）
+    assert pending is None or pending.state == "START"
+    # 至少有一次 send（入口卡）
     assert len(setup.cards) >= 1 or len(setup.texts) >= 1
 
 

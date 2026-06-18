@@ -289,7 +289,15 @@ def advance(user_id: str, text: str = "") -> tuple[str, dict]:
 def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tuple[str, dict]:
     """内部 advance 逻辑：返回 (new_state, response)。不持久化 state。"""
 
+    # 全局重置：用户在任何状态说"我想约车"等约车意图时，清状态回到入口
+    BOOKING_INTENT_PHRASES = ("我想约车", "我要约车", "帮我约车", "约车", "预约车")
+    if text in BOOKING_INTENT_PHRASES and current_state != STATE_START:
+        car_state.clear(user_id)
+        return STATE_START, _entry_card()
+
     # 入口状态：未开始 → 渲染"知道编号吗"问询卡
+    # 关键：渲染入口卡后保持 state=START（不切到 SELECT_VEHICLE_TYPE），
+    # 这样用户点"不知道/知道"按钮回调时仍在 START 状态，marker 能被正确分发。
     if current_state == STATE_START:
         # 优先识别"报编号"快捷路径（用户在 START 直接报编号）
         if text and _VEHICLE_NO_RE.match(text.strip().upper()):
@@ -303,8 +311,8 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 收到"不知道"按钮回调 → 展示车型卡
         if text == _FSM_KNOWN_NO_MARKER:
             return STATE_SELECT_VEHICLE_TYPE, _type_card()
-        # 默认：渲染问询卡
-        return STATE_SELECT_VEHICLE_TYPE, _entry_card()
+        # 默认：渲染问询卡（保持 state=START）
+        return STATE_START, _entry_card()
 
     # SELECT_VEHICLE_TYPE：收车型按钮（用户从"不知道"路径过来）
     if current_state == STATE_SELECT_VEHICLE_TYPE:

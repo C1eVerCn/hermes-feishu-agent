@@ -38,10 +38,10 @@ def test_fsm_class_instantiable():
 
 
 def test_advance_start_returns_entry_card():
-    """START → 入口卡（车型按钮 + 直接输入编号按钮）。"""
+    """START → 入口卡（知道/不知道 按钮）。状态保持 START 等用户点按钮。"""
     car_state.clear("ou_t1")
     new_state, resp = advance("ou_t1", "")
-    assert new_state == "SELECT_VEHICLE_TYPE"
+    assert new_state == "START"
     assert "card" in resp or "text" in resp  # 任一渲染形式
 
 

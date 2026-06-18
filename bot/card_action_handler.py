@@ -105,14 +105,25 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     toast = response.get("text", "")
     card = response.get("card")
     if card is None and (response.get("text") or response.get("buttons")):
-        # text + buttons 混合 → 转成 card（飞书 card_action callback 必须返回 card）
-        lines = [response.get("text", "")]
-        for btn in response.get("buttons", []):
-            lines.append(f"  · {btn['text']}")
-        card = {"config": {"wide_screen_mode": True},
-                "elements": [{"tag": "div",
-                              "text": {"tag": "lark_md",
-                                       "content": "\n".join(s for s in lines if s)}}]}
+        # text + buttons 混合 → 转成 LARK card（div 文本 + actions 真按钮）
+        elements: list[dict] = []
+        if response.get("text"):
+            elements.append({"tag": "div",
+                             "text": {"tag": "lark_md",
+                                      "content": response["text"]}})
+        if response.get("buttons"):
+            # FSM button: {"text": "DM2", "value": {"action": "fsm_select", "value": "DM2"}}
+            # 转为 LARK action button
+            actions = []
+            for btn in response["buttons"]:
+                actions.append({
+                    "tag": "button",
+                    "type": btn.get("type", "default"),
+                    "text": {"tag": "plain_text", "content": btn["text"]},
+                    "value": btn["value"],
+                })
+            elements.append({"tag": "action", "actions": actions})
+        card = {"config": {"wide_screen_mode": True}, "elements": elements}
     return toast, card
 
 
