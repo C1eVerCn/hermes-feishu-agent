@@ -134,7 +134,16 @@ def _handle_identity_query(text: str, user_id: str) -> str:
             2: "可审批本组车辆预约、查询本组待审批列表。",
             3: "拥有全部权限（含跨组审批等系统级操作）。",
         }.get(role, "")
-        return f"您是【{role_name}】。\n{caps}"
+        # 2026-06-18 引导：角色不够时告诉用户怎么自助升级 + 怎么改 MCP 端角色
+        upgrade_hint = ""
+        if role == 1:
+            upgrade_hint = ("\n\n💡 如需审批/管理权限：\n"
+                            "  • 联系管理员让其执行「设置角色 <你的 open_id> 2」\n"
+                            "  • 或在 .env 加 OCL_ADMIN_USER_IDS=<你的 open_id> 自动升级到管理员\n"
+                            "  • 注意：MCP 端设置的角色不会自动同步到这里，需要在本系统独立设置")
+        elif role == 2:
+            upgrade_hint = ("\n\n💡 如需管理员权限：联系现有管理员执行「设置角色 <你的 open_id> 3」")
+        return f"您是【{role_name}】。\n{caps}{upgrade_hint}"
     return ""
 
 
@@ -550,7 +559,9 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
      "fetch_available_vehicles", _args_with_type),
 
     # ── fetch_user_reservation ──
-    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看)?\s*我的\s*(预约记录|预约|所有预约)[\s!！。.]*$'),
+    # 2026-06-18 修：加 "一下/下/看看" 等口语化前缀，避免"查看一下我的预约"被错路由
+    # 到 LLM agent 然后被 booking 工具截走（用户截图反馈 BUG #1）
+    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下|查一下|看看我的)?\s*(一下\s*)?我的\s*(预约记录|预约|所有预约|预约历史|约车记录)[\s!！。.]*$'),
      "fetch_user_reservation", _empty_args),
 
     # ── fetch_user_approval ──

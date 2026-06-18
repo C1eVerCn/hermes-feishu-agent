@@ -260,9 +260,43 @@ def approval_vehicle_reservation(args: dict, **_) -> str:
         return raw
     try:
         result = normalizers.normalize_approval_result(raw_obj)
-        return json.dumps(result.model_dump(), ensure_ascii=False)
     except normalizers.NormalizeError as e:
         return json.dumps({"error": f"上游返回格式异常: {e.reason}"}, ensure_ascii=False)
+
+    # 2026-06-18 通知申请人：审批结果 DM（之前只更新 MCP，不通知 applicant）。
+    try:
+        from bot import reservation_store
+        rid = payload.get("reservationId") or ""
+        rec = reservation_store.get(rid) if rid else None
+        if rec is None and payload.get("vehicleNo"):
+            start_time = (getattr(result, "start_time", "") or "") or ""
+            rec = reservation_store.find_by_vehicle_and_time(
+                payload.get("vehicleNo", ""), start_time)
+        if rec and rec.get("applicant_open_id"):
+            from feishu import notify
+            decision = "✅ 已批准" if reviewer_status == 1 else "❌ 已驳回" if reviewer_status == 2 else "处理中"
+            vno = rec.get("vehicle_no", "")
+            st = rec.get("start_time", "")
+            et = rec.get("end_time", "")
+            task = rec.get("task_name", "")
+            remark = payload.get("reviewerRemark") or ""
+            text = (
+                f"📬 **您的车辆预约审批结果**\n\n"
+                f"🚗 车辆编号：**{vno}**\n"
+                f"⏱️ 时段：{st} ~ {et}\n"
+                f"📝 任务：{task}\n"
+                f"📋 审批结果：**{decision}**\n"
+                + (f"💬 审批意见：{remark}\n" if remark else "")
+                + ("\n💡 可以说「我的预约」查看完整列表" if reviewer_status == 1
+                   else "\n💡 可以说「我的预约」查看完整列表，或重新发起申请")
+            )
+            notify.submit_text_to_user(rec["applicant_open_id"], text)
+            log.info("approval_notified applicant=%s vehicle=%s decision=%s",
+                     rec["applicant_open_id"], vno, decision)
+    except Exception as e:
+        log.warning("approval_notification_failed: %s", e)
+
+    return json.dumps(result.model_dump(), ensure_ascii=False)
 
 
 # ── 6. return_vehicle ─────────────────────────────────────────────────────
