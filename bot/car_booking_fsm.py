@@ -45,9 +45,24 @@ ALL_STATES = frozenset({
 
 
 # ── 按钮定义（spec §3.3） ─────────────────────────────────────────────────
-# 车型按钮：fmp-app common_dictionary VEHICLE_TYPE 大类（vehicle 表的 vehicle_type 列存的是大类）
-# 数据来自 fmp-mysql.common_dictionary WHERE type_code='VEHICLE_TYPE' AND del_flag=0
-VEHICLE_TYPE_BUTTONS = ["427", "Acar", "Bcar", "Ccar", "Dcar", "?Fcar"]
+# 车型细分：fmp-app vehicle 表 vehicle_type_detail 列实际值（15 种 active）
+# 来自 fmp-mysql SELECT DISTINCT vehicle_type_detail FROM vehicle
+#   WHERE del_flag=0 AND status=1
+# 按家族分组（每行一类：427-系列 / A-系列 / B-系列 / C-系列 / D-系列 / 大F车）
+VEHICLE_TYPE_BUTTONS = [
+    # 427-系列
+    "427-M0", "427-M1",
+    # A-系列 (Acar)
+    "AM2", "AM3",
+    # B-系列 (Bcar)
+    "BM0", "BM1", "BM2",
+    # C-系列 (Ccar)
+    "CM0", "CM2", "CT1", "CT2",
+    # D-系列 (Dcar)
+    "DM0", "DM1", "DM2",
+    # 大F车
+    "?Fcar",
+]
 CHIP_BUTTONS = ["Xavier", "ADCU", "Orin", "Thor"]
 ENTRY_MODE_BUTTONS = ["已知编号", "帮我查"]
 TASK_HINT_BUTTONS = ["MFF调试", "路测", "数据采集"]
@@ -316,11 +331,11 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 默认：渲染问询卡（保持 state=START）
         return STATE_START, _entry_card()
 
-    # SELECT_VEHICLE_TYPE：收车型按钮（用户从"不知道"路径过来）
+    # SELECT_VEHICLE_TYPE：收车型细分按钮（用户从"不知道"路径过来）
     if current_state == STATE_SELECT_VEHICLE_TYPE:
         if text in VEHICLE_TYPE_BUTTONS:
-            car_state.save(user_id, vehicle_type=text)
-            # 统一过 CONFIRM_CHIP（避免"自动带上芯片"的歧义）
+            # 细分（如 DM0/CM0/427-M1）存到 vehicle_type_detail 字段
+            car_state.save(user_id, vehicle_type_detail=text)
             return STATE_CONFIRM_CHIP, {
                 "text": f"已选车型 {text}。请选择芯片平台：",
                 "buttons": [{"text": t, "value": {"action": "fsm_select_chip", "value": t}}
@@ -399,6 +414,9 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         pending_now = car_state.get(user_id)
         try:
             raw = _mc.get_mcp_client().call("fetch_available_vehicles", {
+                # vehicleTypeDetail（如 DM0/CM0/427-M1）是 fmp-app SQL 的过滤字段
+                # vehicleType（大类）保持兼容（如果细分为空也能按大类筛）
+                "vehicleTypeDetail": pending_now.vehicle_type_detail,
                 "vehicleType": pending_now.vehicle_type,
                 "platform": pending_now.chip,
             })
@@ -420,12 +438,15 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 缓存到 car_state（供 Task 5 文本选车"约第N个"反查）
         car_state.save(user_id,
                        last_vehicles=vehicles_list,
-                       last_query={"vehicleType": pending_now.vehicle_type,
+                       last_query={"vehicleTypeDetail": pending_now.vehicle_type_detail,
+                                   "vehicleType": pending_now.vehicle_type,
                                    "platform": pending_now.chip})
 
-        # 标题：查询条件（spec §5.3）
+        # 标题：查询条件（spec §5.3）— 优先显示细分，再显示大类
         ql_parts = []
-        if pending_now.vehicle_type:
+        if pending_now.vehicle_type_detail:
+            ql_parts.append(pending_now.vehicle_type_detail)
+        elif pending_now.vehicle_type:
             ql_parts.append(pending_now.vehicle_type)
         if pending_now.chip:
             ql_parts.append(f"{pending_now.chip}芯片")
@@ -581,13 +602,14 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         pending_c = car_state.get(user_id)
         try:
             raw = _h._commit_single_vehicle_reservation({
-                "vehicleNo":   pending_c.vehicle_no,
-                "vehicleType": pending_c.vehicle_type,
-                "platform":    pending_c.chip,
-                "startTime":   pending_c.start_time,
-                "endTime":     pending_c.end_time,
-                "taskName":    pending_c.task_name,
-                "location":    pending_c.location,
+                "vehicleNo":          pending_c.vehicle_no,
+                "vehicleType":        pending_c.vehicle_type,
+                "vehicleTypeDetail":  pending_c.vehicle_type_detail,
+                "platform":           pending_c.chip,
+                "startTime":          pending_c.start_time,
+                "endTime":            pending_c.end_time,
+                "taskName":           pending_c.task_name,
+                "location":           pending_c.location,
             })
             result = json.loads(raw) if isinstance(raw, str) else raw
             if isinstance(result, dict) and "error" in result:
@@ -667,12 +689,13 @@ def _success_card(user_id: str) -> dict:
 def _normalize_vehicle_keys(v: dict) -> dict:
     """MCP 返回的 camelCase 字段归一化为 snake_case，供 build_vehicles_card 消费。
 
-    build_vehicles_card 期望 vehicle_no / vehicle_type / platform / license_plate / vin。
-    MCP 边界可能传 vehicleNo / vehicleType / platform / licensePlate / vin。
+    build_vehicles_card 期望 vehicle_no / vehicle_type / platform / license_plate / vin /
+    vehicle_type_detail。MCP 边界可能传 vehicleNo / vehicleType / platform / licensePlate / vin。
     """
     return {
         "vehicle_no":    v.get("vehicleNo") or v.get("vehicle_no", ""),
         "vehicle_type":  v.get("vehicleType") or v.get("vehicle_type", ""),
+        "vehicle_type_detail": v.get("vehicleTypeDetail") or v.get("vehicle_type_detail", ""),
         "platform":      v.get("platform", ""),
         "license_plate": v.get("licensePlate") or v.get("license_plate", ""),
         "vin":           v.get("vin", ""),

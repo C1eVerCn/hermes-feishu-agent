@@ -13,13 +13,13 @@ def setup():
 
 
 def test_fsm_select_button_translates_value_to_text():
-    """fsm_select 按钮：value='Bcar' → advance('Bcar') → SELECT_VEHICLE_TYPE 处理。
-    所有车型统一过 CONFIRM_CHIP（即使单芯片车型也确认一次）。"""
+    """fsm_select 按钮：value='BM0' → advance('BM0') → SELECT_VEHICLE_TYPE 处理。
+    选车型细分后存到 vehicle_type_detail 字段，统一过 CONFIRM_CHIP。"""
     car_state.save("ou_act", state="SELECT_VEHICLE_TYPE")
-    toast, card = card_action_handler.handle("ou_act", {"action": "fsm_select", "value": "Bcar"})
+    toast, card = card_action_handler.handle("ou_act", {"action": "fsm_select", "value": "BM0"})
     pending = car_state.get("ou_act")
     assert pending.state == "CONFIRM_CHIP"
-    assert pending.vehicle_type == "Bcar"
+    assert pending.vehicle_type_detail == "BM0"
     assert pending.chip == ""  # chip 还没选
     car_state.clear("ou_act")
 
@@ -49,14 +49,9 @@ def test_fsm_known_yes_button():
 
 def test_fsm_dur_confirm_with_no_vehicle_no():
     """fsm_dur_confirm：vehicle_no 空 → SELECT_FROM_LIST（查车）。"""
-    car_state.save("ou_act", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+    car_state.save("ou_act", state="SELECT_DURATION", vehicle_type_detail="DM0", chip="Xavier",
                    duration_minutes=60)
     toast, card = card_action_handler.handle("ou_act", {"action": "fsm_dur_confirm"})
-    # 实际 SELECT_DURATION 收到 marker，会调 advance → 触发 fetch（或失败）
-    # 此处只测 marker 翻译正确：_handle_fsm_button 把 fsm_dur_confirm 转为 "__fsm_dur_confirm__"
-    # 然后 advance 在 SELECT_DURATION 状态下识别，落到 SELECT_FROM_LIST
-    # 没 mock mcp_client，所以可能 raise；这里只验证到 marker 翻译
-    # 实际 fetch 会失败（容器内）→ SELECT_FROM_LIST 但 last_vehicles=[]
     pending = car_state.get("ou_act")
     assert pending.duration_minutes == 60
     car_state.clear("ou_act")

@@ -46,9 +46,9 @@ def test_advance_start_returns_entry_card():
 
 
 def test_advance_select_vehicle_type_button():
-    """SELECT_VEHICLE_TYPE 收车型按钮 → 统一进 CONFIRM_CHIP（用户偏好：选完车型再选芯片）。"""
+    """SELECT_VEHICLE_TYPE 收车型细分按钮 → 统一进 CONFIRM_CHIP（用户偏好：选完车型再选芯片）。"""
     car_state.save("ou_t2", state="SELECT_VEHICLE_TYPE")
-    new_state, resp = advance("ou_t2", "Bcar")
+    new_state, resp = advance("ou_t2", "BM0")
     assert new_state == "CONFIRM_CHIP"
 
 
@@ -120,7 +120,7 @@ def test_advance_select_from_list_returns_table(monkeypatch):
     """SELECT_FROM_LIST 查车 → 表格卡 + 缓存 last_vehicles 到 car_state。
     新流程：SELECT_DURATION 收到「确认」且 vehicle_no 空 → 查车 → SELECT_FROM_LIST。"""
     monkeypatch.setattr(_mc, "_client", _FakeMcpWithCars())
-    car_state.save("ou_t3", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+    car_state.save("ou_t3", state="SELECT_DURATION", vehicle_type_detail="DM0", chip="Xavier",
                    duration_minutes=60)
     new_state, resp = advance("ou_t3", "__fsm_dur_confirm__")
     assert new_state == "SELECT_FROM_LIST"
@@ -139,7 +139,7 @@ def test_advance_select_from_list_no_cars(monkeypatch):
             return {"items": []}
 
     monkeypatch.setattr(_mc, "_client", _Empty())
-    car_state.save("ou_t3b", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+    car_state.save("ou_t3b", state="SELECT_DURATION", vehicle_type_detail="DM0", chip="Xavier",
                    duration_minutes=60)
     new_state, resp = advance("ou_t3b", "__fsm_dur_confirm__")
     assert new_state == "SELECT_FROM_LIST"
@@ -157,7 +157,7 @@ def test_advance_select_from_list_fetch_error(monkeypatch):
             raise McpError("upstream timeout")
 
     monkeypatch.setattr(_mc, "_client", _Fail())
-    car_state.save("ou_t3c", state="SELECT_DURATION", vehicle_type="DM2", chip="Xavier",
+    car_state.save("ou_t3c", state="SELECT_DURATION", vehicle_type_detail="DM0", chip="Xavier",
                    duration_minutes=60)
     new_state, resp = advance("ou_t3c", "__fsm_dur_confirm__")
     assert new_state == "SELECT_FROM_LIST"
@@ -398,6 +398,7 @@ def test_advance_commit_to_success(monkeypatch):
         @staticmethod
         def _commit_single_vehicle_reservation(args, **_):
             return json.dumps({"vehicle_no": "PNV000", "vehicle_type": "DM2",
+                               "vehicle_type_detail": "DM0",
                                "platform": "Xavier", "license_plate": "沪X000",
                                "start_time": "2026-06-17 14:00",
                                "end_time": "2026-06-17 16:00",
@@ -406,11 +407,14 @@ def test_advance_commit_to_success(monkeypatch):
     monkeypatch.setattr(_h, "_commit_single_vehicle_reservation",
                         _FakeHandlers._commit_single_vehicle_reservation)
     car_state.save("ou_t14", state="COMMIT", vehicle_no="PNV000",
-                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   vehicle_type="DM2", vehicle_type_detail="DM0",
+                   chip="Xavier", duration_minutes=120,
                    start_time="2026-06-17 14:00", end_time="2026-06-17 16:00",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00",
-                   task_name="MFF调试", location="上海")
+                   task_name="MFF调试", location="上海",
+                   last_vehicles=[{"vehicle_no": "PNV000", "vehicle_type": "DM2",
+                                    "vehicle_type_detail": "DM0", "platform": "Xavier"}])
     new_state, resp = advance("ou_t14", "")
     assert new_state == "SUCCESS"
     assert "card" in resp
@@ -429,11 +433,14 @@ def test_advance_commit_error_returns_to_start(monkeypatch):
     monkeypatch.setattr(_h, "_commit_single_vehicle_reservation",
                         _Fail._commit_single_vehicle_reservation)
     car_state.save("ou_t14b", state="COMMIT", vehicle_no="PNV000",
-                   vehicle_type="DM2", chip="Xavier", duration_minutes=120,
+                   vehicle_type="DM2", vehicle_type_detail="DM0",
+                   chip="Xavier", duration_minutes=120,
                    start_time="2026-06-17 14:00", end_time="2026-06-17 16:00",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00",
-                   task_name="MFF调试", location="上海")
+                   task_name="MFF调试", location="上海",
+                   last_vehicles=[{"vehicle_no": "PNV000", "vehicle_type": "DM2",
+                                    "vehicle_type_detail": "DM0", "platform": "Xavier"}])
     new_state, resp = advance("ou_t14b", "")
     assert new_state == "START"
     assert "提交失败" in resp["text"]
