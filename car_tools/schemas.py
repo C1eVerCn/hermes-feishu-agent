@@ -57,16 +57,23 @@ class Reservation(_Strict):
 
 
 class ReservationResult(_Strict):
-    """single_vehicle_reservation 成功返回值。"""
+    """single_vehicle_reservation 成功返回值。
+
+    2026-06-18 fix：dmz-fmp-mcp 上游响应字段不可靠：
+    - platform 字段可能缺失/空（fmp 端 Vehicle 表反查，但 fmp-mcp 没传 platform args）
+    - vehicle_no / vehicle_type / start_time / end_time / task_name / location
+      在 fmp response 里可能为空字符串
+    改为 Optional/默认值让 Pydantic 容错；success: True 表明预约成功。
+    """
     success: bool
-    vehicle_no: str
+    vehicle_no: Optional[str] = None
     license_plate: Optional[str] = None
-    vehicle_type: str
-    platform: Platform
-    start_time: str
-    end_time: str
-    task_name: str
-    location: str
+    vehicle_type: Optional[str] = None
+    platform: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    task_name: Optional[str] = None
+    location: Optional[str] = None
     remark: Optional[str] = None
     dispatchers: list[Dispatcher] = Field(default_factory=list)
     reason: Optional[str] = None

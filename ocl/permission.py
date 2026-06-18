@@ -5,8 +5,10 @@
 设计要点：
 - L1（hermes插件 pre_tool_call钩子）=硬拦截
 - L2（ocl.tool_guard.guarded()包裹）=兜底
-- 真实业务权限仍由后端（MCP server）按 openid/email 校验；本地只做
-  工具能否被 LLM调起的粗粒度门控。
+- 真实业务权限仍由后端（MCP server）按 emailAddress 校验；openid 仅在
+  OCL L1/L2 本地鉴权层使用（2026-06-18 后 openid 不再注入到上游 fmp，
+  dmz-fmp-mcp 9 个 @Tool 都不接受 openId 形参）。本地只做工具能否被
+  LLM 调起的粗粒度门控。
 
 角色映射（车辆预约域）：
 - role=1 普通用户：查询可用车辆、预约 / 取消 / 归还、查我的预约

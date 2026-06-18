@@ -65,11 +65,30 @@ def _call_fmp_tool(tool_name: str, arguments: dict) -> dict:
                         log.warning("fmp_mcp_empty_text tool=%s args=%s", tool_name, arguments)
                         return {"code": 500, "message": "上游返回空", "data": None}
                     raw_text = texts[0]
-                    # 上游返回的多是 JSON 字符串（"{\"code\":200,...}"），尝试解析
-                    try:
-                        return json.loads(raw_text)
-                    except (json.JSONDecodeError, ValueError):
-                        return {"raw": raw_text}
+                    # dmz-fmp-mcp (Spring AI MCP) 是**双层 JSON 序列化**：
+                    # TextContent.text 整体是一个 JSON 字符串，解析后形如
+                    #   {"type":"text","text":"<内层 JSON 字符串>"}
+                    # 内层才是真正的业务响应 {"code":200,"message":"success","data":...}
+                    # 也兼容 fmp 不再双层序列化时直接是单层业务 JSON。
+                    parsed: Any = raw_text
+                    if isinstance(parsed, str):
+                        try:
+                            envelope = json.loads(parsed)
+                        except (json.JSONDecodeError, ValueError):
+                            envelope = None
+                        if isinstance(envelope, dict) and isinstance(envelope.get("text"), str):
+                            # 双层：剥外层 envelope，继续解内层
+                            try:
+                                parsed = json.loads(envelope["text"])
+                            except (json.JSONDecodeError, ValueError):
+                                parsed = envelope["text"]
+                        elif envelope is not None:
+                            # 单层：业务 JSON
+                            parsed = envelope
+                        # else: parsed 仍是 str（不是 JSON），下方 isinstance 兜底
+                    if not isinstance(parsed, dict):
+                        return {"raw": parsed}
+                    return parsed
         except Exception as e:
             log.warning("fmp_mcp_call_failed tool=%s err=%s", tool_name, e)
             return {"code": 500, "message": f"MCP 调用失败: {type(e).__name__}: {e}", "data": None}
@@ -77,7 +96,11 @@ def _call_fmp_tool(tool_name: str, arguments: dict) -> dict:
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # 已在 async 上下文（如 FastMCP 内部）—— 退回到线程池
+            # 已在 async 上下文（如 FastMCP 内部）—— 退回到线程池。
+            # TODO（2026-06-18 C6 review finding）：ThreadPoolExecutor(max_workers=1)
+            # 会把并发 MCP 工具调用串行化。当前 FastMCP stdio 是同步分发未触发；
+            # 若未来改成 async dispatch 并行触发多工具，需改用 module-level pool
+            # （workers >= 4）或维护长连接 session 替代每次 asyncio.run。
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                 return ex.submit(asyncio.run, _call()).result()

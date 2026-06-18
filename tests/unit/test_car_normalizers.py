@@ -192,12 +192,17 @@ def test_normalize_reservation_result_injects_applicant():
     assert out.applicant_email == "x@y.com"
 
 
-def test_normalize_reservation_result_missing_required():
-    with pytest.raises(normalizers.NormalizeError):
-        normalizers.normalize_reservation_result({
-            "vehicleNo": "PNV332",
-            # vehicleType / platform / startTime / endTime / taskName / location 都缺
-        })
+def test_normalize_reservation_result_tolerates_missing_fields():
+    """2026-06-18 fix：fmp 上游 response 字段不可靠（platform/vehicle_no 等常为空），
+    ReservationResult 字段改 Optional/默认值。normalize 不再 raise NormalizeError。"""
+    out = normalizers.normalize_reservation_result({
+        "vehicleNo": "PNV332",
+        # vehicleType / platform / startTime / endTime / taskName / location 都缺
+    })
+    # 缺 success → normalize 默认 True（不抛错）
+    assert out.success is True
+    assert out.vehicle_no == "PNV332"  # 显式传入的值保留
+    assert out.vehicle_type == ""  # 缺字段 → normalize 填空字符串（容错）
 
 
 # ── normalize_approval_result ──────────────────────────────────────────────

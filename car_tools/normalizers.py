@@ -122,37 +122,75 @@ class NormalizeError(ValueError):
         self.raw = raw
 
 
+# ── 字段映射辅助：三级 fallback helper ─────────────────────────────────────
+# 2026-06-18：dmz-fmp-mcp 返回中文字段（车型细分/车型/车辆编号/芯片/车牌号/VIN码/
+# 项目/审批人/归还时间/归还地点 等），同时仍可能返 camelCase / snake_case 英文。
+# 用 _get_first 统一按优先级取第一个非 None 值；替代到处复制的 d.get('X') or d.get('Y') 链。
+
+def _get_first(d: dict, *keys: str, default: Any = "") -> Any:
+    """按 keys 顺序取 d 中第一个非 None 值；都缺则返回 default（默认 ''）。"""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return default
+
+
 # ── 字段映射（camelCase MCP → snake_case Pydantic） ─────────────────────────
 # 仅列出 schema 已声明的字段；新出现的 MCP 字段会被 Pydantic extra=forbid 拒绝。
 
 def _vehicle_from_raw(d: dict) -> Vehicle:
-    """单条 vehicle dict → Vehicle。"""
+    """单条 vehicle dict → Vehicle。
+
+    2026-06-18 fix：兼容 dmz-fmp-mcp 实际返回的**中文字段**（车辆编号/车型/车型细分/
+    项目/芯片/车牌号/VIN码），同时保留对 camelCase / snake_case 英文键名的兼容。
+    """
     return Vehicle(
-        vehicle_no=d.get("vehicleNo") or d.get("vehicle_no") or "",
-        vin=d.get("vin"),
-        license_plate=d.get("licensePlate") or d.get("license_plate"),
-        vehicle_type=d.get("vehicleType") or d.get("vehicle_type") or "",
-        platform=d.get("platform") or "",
-        project=d.get("project"),
+        vehicle_no=_get_first(d, "车辆编号", "vehicleNo", "vehicle_no"),
+        vin=_get_first(d, "VIN码", "vin") or None,
+        license_plate=_get_first(d, "车牌号", "licensePlate", "license_plate") or None,
+        vehicle_type=_get_first(d, "车型", "vehicleType", "vehicle_type"),
+        platform=_get_first(d, "芯片", "platform"),
+        project=_get_first(d, "项目", "project") or None,
         remark=d.get("remark"),
     )
 
 
+def _vehicle_to_card_dict(d: dict) -> dict:
+    """raw vehicle dict → 卡片用 snake_case dict（不构造 Pydantic Vehicle）。
+
+    2026-06-18 新增：供 bot/car_booking_fsm.py::_normalize_vehicle_keys 复用，
+    避免 fsm.py 与 normalizers.py 维护两份相同的中英字段映射表。返回 dict 字段：
+    vehicle_no / vin / license_plate / vehicle_type / vehicle_type_detail / platform / project。
+    缺值时 '' 兜底（与 _vehicle_from_raw 一致）。
+    """
+    return {
+        "vehicle_no":          _get_first(d, "车辆编号", "vehicleNo", "vehicle_no"),
+        "vin":                 _get_first(d, "VIN码", "vin"),
+        "license_plate":       _get_first(d, "车牌号", "licensePlate", "license_plate"),
+        "vehicle_type":        _get_first(d, "车型", "vehicleType", "vehicle_type"),
+        "vehicle_type_detail": _get_first(d, "车型细分", "vehicleTypeDetail", "vehicle_type_detail"),
+        "platform":            _get_first(d, "芯片", "platform"),
+        "project":             _get_first(d, "项目", "project"),
+    }
+
+
 def _reservation_from_raw(d: dict) -> Reservation:
+    # 2026-06-18 fix：兼容 dmz-fmp-mcp 中文字段（任务名称/地点/状态/审批人/审批意见 等）
     return Reservation(
-        vehicle_no=d.get("vehicleNo") or d.get("vehicle_no") or "",
-        vehicle_type=d.get("vehicleType") or d.get("vehicle_type"),
-        platform=d.get("platform"),
-        license_plate=d.get("licensePlate") or d.get("license_plate"),
-        start_time=d.get("startTime") or d.get("start_time") or "",
-        end_time=d.get("endTime") or d.get("end_time") or "",
-        task_name=d.get("taskName") or d.get("task_name"),
-        location=d.get("location"),
-        status=_normalize_reservation_status(d.get("status")),
-        reviewer=d.get("reviewer") or d.get("reviewerName"),
-        reviewer_remark=d.get("reviewerRemark") or d.get("reviewer_remark"),
-        return_time=d.get("returnTime") or d.get("return_time"),
-        return_location=d.get("returnLocation") or d.get("return_location"),
+        vehicle_no=_get_first(d, "车辆编号", "vehicleNo", "vehicle_no"),
+        vehicle_type=_get_first(d, "车型", "vehicleType", "vehicle_type"),
+        platform=_get_first(d, "芯片", "platform"),
+        license_plate=_get_first(d, "车牌号", "licensePlate", "license_plate"),
+        start_time=_get_first(d, "开始时间", "startTime", "start_time"),
+        end_time=_get_first(d, "结束时间", "endTime", "end_time"),
+        task_name=_get_first(d, "任务名称", "taskName", "task_name"),
+        location=_get_first(d, "地点", "location"),
+        status=_normalize_reservation_status(_get_first(d, "状态", "status", default=None)),
+        reviewer=_get_first(d, "审批人", "reviewer", "reviewerName", default=None),
+        reviewer_remark=_get_first(d, "审批意见", "reviewerRemark", "reviewer_remark", default=None),
+        return_time=_get_first(d, "归还时间", "returnTime", "return_time", default=None),
+        return_location=_get_first(d, "归还地点", "returnLocation", "return_location", default=None),
     )
 
 

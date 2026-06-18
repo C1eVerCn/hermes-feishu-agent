@@ -30,11 +30,16 @@ log = logging.getLogger(__name__)
 # ── 身份注入 ──────────────────────────────────────────────────────────────
 
 def _inject_caller(args: dict) -> dict:
-    """从 contextvars 读 CallerIdentity，注入 openid/email（camelCase 给上游 MCP）。"""
+    """从 contextvars 读 CallerIdentity，注入 emailAddress（camelCase 给上游 MCP）。
+
+    2026-06-18 fix：移除 openId 注入 —— dmz-fmp-mcp 9 个 @Tool 函数签名都不接受
+    openId（只认 emailAddress / 业务参数），注入 openId 会导致
+    `TypeError: got an unexpected keyword argument 'openId'`，所有走 _call_mcp
+    路径的 fast-path / handler 工具调用都失败。
+    openid 仍可通过 CallerIdentity 在 OCL L1/L2 鉴权层读取，不必传给上游 fmp。
+    """
     caller = get_current_caller()
     injected: dict[str, Any] = {}
-    if caller.openid:
-        injected["openId"] = caller.openid
     if caller.email:
         injected["emailAddress"] = caller.email
     return {**injected, **args}

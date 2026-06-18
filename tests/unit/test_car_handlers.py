@@ -53,25 +53,26 @@ def auth_caller():
 # ── 身份注入 ──────────────────────────────────────────────────────────────
 
 def test_caller_injected_into_args(fake_mcp, auth_caller):
-    """身份注入：openId / emailAddress 应出现在 MCP args 中。"""
+    """身份注入：2026-06-18 移除 openId 注入后，只剩 emailAddress。
+    9 个 MCP @Tool 函数签名都不接受 openId（注入会导致 TypeError）。"""
     handlers.fetch_available_vehicles({"vehicle_type": "DM2", "platform": "Xavier",
                                        "start_time": "2026-06-16 09:00",
                                        "end_time": "2026-06-16 18:00"})
     assert fake_mcp.calls, "mcp_client.call 未被调用"
     tool, args = fake_mcp.calls[0]
     assert tool == "fetch_available_vehicles"
-    assert args["openId"] == "ou_alice"
+    assert "openId" not in args  # 已删除
     assert args["emailAddress"] == "alice@x.com"
 
 
 def test_no_email_in_args_when_empty(fake_mcp):
-    """email 为空时不应注入 emailAddress 字段。"""
+    """email 为空时不应注入 emailAddress 字段。openId 也不再注入。"""
     set_current_caller(CallerIdentity(openid="ou_alice"))
     handlers.fetch_available_vehicles({"vehicle_type": "DM2", "platform": "Xavier",
                                        "start_time": "2026-06-16 09:00",
                                        "end_time": "2026-06-16 18:00"})
     _, args = fake_mcp.calls[0]
-    assert args.get("openId") == "ou_alice"
+    assert "openId" not in args  # 已删除
     assert "emailAddress" not in args
 
 
@@ -125,7 +126,8 @@ def test_commit_calls_mcp_with_args(fake_mcp, auth_caller):
     tool, args = fake_mcp.calls[0]
     assert tool == "single_vehicle_reservation"
     assert args["vehicleNo"] == "PNV332"
-    assert args["openId"] == "ou_alice"
+    assert "openId" not in args  # 2026-06-18 已删除
+    assert args["emailAddress"] == "alice@x.com"
     # 关键契约：返回值为 snake_case 序列化的 ReservationResult
     parsed = json.loads(raw)
     assert parsed["vehicle_no"] == "PNV332"
@@ -200,7 +202,7 @@ def test_get_user_context(fake_mcp, auth_caller):
     raw = handlers.get_user_context({})
     _, args = fake_mcp.calls[0]
     assert args.get("emailAddress") == "alice@x.com"
-    assert args["openId"] == "ou_alice"
+    assert "openId" not in args  # 2026-06-18 已删除
 
 
 def test_get_common_dictionary_via_mcp(fake_mcp, auth_caller):
