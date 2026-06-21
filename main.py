@@ -42,6 +42,35 @@ def _prewarm_agent_pool() -> None:
         logging.getLogger(__name__).exception("agent_pool prewarm failed")
 
 
+def _prewarm_mcp() -> None:
+    """Warm up dmz-fmp-mcp connection at startup to hide Spring AI cold start.
+
+    2026-06-18 实测：首次 MCP 调用 10935ms（Spring AI / JVM 冷启动），
+    后续调用 91ms。预热一次让"首次用户消息"也快。
+
+    调用一个无害的 get_common_dictionary 工具，触发 dmz-fmp-mcp 初始化。
+    """
+    import concurrent.futures
+    log = logging.getLogger(__name__)
+    t0 = time.monotonic()
+    def _do_warmup():
+        from ocl.tool_guard import set_current_caller, CallerIdentity
+        from car_tools.mcp_client import get_mcp_client
+        set_current_caller(CallerIdentity(openid="__warmup__", email=""))
+        client = get_mcp_client()
+        # get_common_dictionary 无业务参数，调一次触发 SSE 会话 + Spring 初始化
+        client.call("get_common_dictionary", {"typeCode": "vehicle_type"})
+    try:
+        # 在独立线程跑（get_common_dictionary 内部用 asyncio.run，不阻塞 main）
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(_do_warmup)
+            future.result(timeout=30)
+        log.info("mcp prewarmed in %.2fs (get_common_dictionary)", time.monotonic() - t0)
+    except Exception:
+        log.warning("mcp prewarm failed (best-effort, first call may be slow)",
+                    exc_info=True)
+
+
 def main() -> None:
     # 2026-06-18: 注册 faulthandler，方便 SIGUSR1 dump stack 排查卡死
     # （如 SELECT_FROM_LIST 在生产环境偶发 hang —— 之前没有 faulthandler 看不到）。
@@ -68,6 +97,8 @@ def main() -> None:
     # Pre-warm the agent pool BEFORE opening the health port, so /health
     # accurately reports ws_connected=true and the bot is fully ready.
     _prewarm_agent_pool()
+    # 2026-06-18: 预热 dmz-fmp-mcp 连接（Spring AI 冷启动 ~10s，预热后首次用户消息也快）
+    _prewarm_mcp()
 
     consumer_thread = threading.Thread(target=start_consumer, daemon=True, name="consumer")
     ws_thread = threading.Thread(target=start_ws_supervision, daemon=True, name="ws-supervisor")

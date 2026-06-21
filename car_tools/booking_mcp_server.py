@@ -52,6 +52,9 @@ def _call_fmp_tool(tool_name: str, arguments: dict) -> dict:
 
     实现：每次调用打开一个新的 SSE 会话 → initialize → call_tool → 关闭。
     简单可靠；如需高频优化可改为全局 session pool。
+    （2026-06-18 main.py 加 _prewarm_mcp 让启动时预热 dmz-fmp-mcp，
+    隐藏 Spring AI 冷启动的 ~10s。SSE session 复用暂不做——避免
+    session 失效时静默失败更难定位。）
     """
     async def _call() -> dict:
         try:
