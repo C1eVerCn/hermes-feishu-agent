@@ -342,6 +342,89 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
     return STATE_SUCCESS, _success_card(user_id)
 
 
+def _fetch_vehicles_with_fallback(mcp_client_module, pending) -> dict:
+    """fetch_available_vehicles 三级 fallback：返回 {"vehicles": [...], "recommendations": [...]}。
+
+    2026-06-18 用户反馈：原代码"无车就给提示"不够——应该告诉用户
+    同芯片下其他车型可选。三级 fallback：
+      1) 具体 (vehicleTypeDetail + platform) → 精确匹配
+      2) 仅 platform（去掉车型）→ 同芯片其他车型推荐
+      3) 无 filter → 车组所有可用车辆
+    """
+    def _call(args: dict) -> list:
+        try:
+            raw = mcp_client_module.get_mcp_client().call(
+                "fetch_available_vehicles", args)
+        except Exception as e:
+            log.warning("fetch_available_vehicles failed args=%s err=%s", args, e)
+            return []
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = (raw.get("items") or raw.get("vehicles")
+                     or raw.get("data") or [])
+        else:
+            items = []
+        return [normalizers._vehicle_to_card_dict(v)
+                for v in items if isinstance(v, dict)]
+
+    # 1) 精确匹配
+    type_detail = pending.vehicle_type_detail if pending else ""
+    type_class = pending.vehicle_type if pending else ""
+    chip = pending.chip if pending else ""
+    vehicles = _call({"vehicleTypeDetail": type_detail,
+                      "vehicleType": type_class,
+                      "platform": chip})
+    if vehicles:
+        return {"vehicles": vehicles, "recommendations": []}
+
+    # 2) 同芯片其他车型（去掉车型过滤）
+    if chip:
+        same_chip = _call({"platform": chip})
+        if same_chip:
+            return {"vehicles": [], "recommendations": same_chip}
+
+    # 3) 车组所有可用车辆
+    any_cars = _call({})
+    return {"vehicles": [], "recommendations": any_cars}
+
+
+def _build_recommendation_card(recommendations: list, pending) -> dict:
+    """无车推荐卡：按车型聚合展示可用数量 + 「换车型」快捷按钮。
+
+    2026-06-18：用户点「换车型」按钮直接切到那个车型 + 当前 chip，
+    重新走 SELECT_FROM_LIST。
+    """
+    from collections import Counter
+    type_counts = Counter(
+        v.get("vehicle_type_detail") or v.get("vehicle_type") or "未知车型"
+        for v in recommendations
+    )
+    top_types = type_counts.most_common(6)
+    elements: list[dict] = [
+        {"tag": "div", "text": {"tag": "lark_md",
+         "content": ("💡 **同芯片下，您车组可用的车型**（点下方按钮切换）：\n\n"
+                     f"已选芯片：**{pending.chip or '未选'}**\n")}}
+    ]
+    lines = ["| 车型 | 可用数量 |", "|------|----------|"]
+    for t, n in top_types:
+        lines.append(f"| {t} | {n} |")
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)}})
+    buttons = [
+        {"tag": "button", "type": "primary",
+         "text": {"tag": "plain_text", "content": f"换 {t}"},
+         "value": {"action": "fsm_select_type", "value": t}}
+        for t, _ in top_types
+    ]
+    if len(buttons) >= 2:
+        elements.append({"tag": "column_set",
+                         "columns": [{"tag": "column",
+                                      "elements": [b], "weight": 1} for b in buttons]})
+    else:
+        elements.extend(buttons)
+    return _card_wrap(elements)
+
+
 def _resolve_vehicle_from_text(text: str, candidates: list) -> dict | None:
     """从 candidates 反查车辆（spec §3.4 ⑤：序号 → 完整编号 → 后缀匹配）。
 
@@ -606,37 +689,23 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         from car_tools import card_builder as _cb
 
         pending_now = car_state.get(user_id)
-        try:
-            raw = _mc.get_mcp_client().call("fetch_available_vehicles", {
-                # vehicleTypeDetail（如 DM0/CM0/427-M1）是 fmp-app SQL 的过滤字段
-                # vehicleType（大类）保持兼容（如果细分为空也能按大类筛）
-                "vehicleTypeDetail": pending_now.vehicle_type_detail,
-                "vehicleType": pending_now.vehicle_type,
-                "platform": pending_now.chip,
-            })
-        except Exception as e:
-            log.warning("select_from_list fetch failed: %s", e)
-            raw = {"items": []}
+        # 2026-06-18 用户反馈：查不出车时应该推荐同芯片其他车型，而不是只说"没有"。
+        # fetch_available_vehicles 三级 fallback：
+        #   1) 具体 (vehicleTypeDetail + platform)
+        #   2) 仅 platform（去掉车型，按同芯片推荐其他车型）
+        #   3) 无 filter（车组所有可用车辆）
+        result = _fetch_vehicles_with_fallback(_mc, pending_now)
+        vehicles_list = result["vehicles"]
+        recommendations = result["recommendations"]
 
-        # 解析响应：MCP 边界格式可能是 list / {"items": [...]} / {"data": [...]}。
-        # car_tools.card_builder.build_vehicles_card 接受 list[dict]（snake_case）。
-        vehicles_list: list[dict] = []
-        if isinstance(raw, list):
-            vehicles_list = raw
-        elif isinstance(raw, dict):
-            items = raw.get("items") or raw.get("vehicles") or raw.get("data") or []
-            if isinstance(items, list):
-                # 字段名归一化：camelCase → snake_case（card_builder 期望 snake_case）
-                vehicles_list = [normalizers._vehicle_to_card_dict(v) for v in items if isinstance(v, dict)]
-
-        # 缓存到 car_state（供 Task 5 文本选车"约第N个"反查）
+        # 缓存到 car_state
         car_state.save(user_id,
                        last_vehicles=vehicles_list,
                        last_query={"vehicleTypeDetail": pending_now.vehicle_type_detail,
                                    "vehicleType": pending_now.vehicle_type,
                                    "platform": pending_now.chip})
 
-        # 标题：查询条件（spec §5.3）— 优先显示细分，再显示大类
+        # 标题：查询条件
         ql_parts = []
         if pending_now.vehicle_type_detail:
             ql_parts.append(pending_now.vehicle_type_detail)
@@ -645,29 +714,47 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         if pending_now.chip:
             ql_parts.append(f"{pending_now.chip}芯片")
         query_label = " · ".join(ql_parts) if ql_parts else None
-        card = _cb.build_vehicles_card(vehicles_list, query_label=query_label)
 
-        # 2026-06-18 fix：区分"有车可选" vs "该车型×该芯片无车"两种场景，
-        # 避免"已选时长...请选车"误导用户，并给具体可换的芯片建议。
-        # review finding 5 修复：alt_chips 用 CHIP_BUTTONS 而不是硬编码 4 元组，
-        # 单一事实源，新增芯片时自动同步。
-        # 2026-06-18 引导性增强：加步骤进度 + 选车方式说明（按钮/报编号 二选一）。
+        # 2026-06-18 引导性增强 + 无车推荐：三种场景分渲染
         if vehicles_list:
+            card = _cb.build_vehicles_card(vehicles_list, query_label=query_label)
             text = (f"**🚗 第 4/8 步：选择车辆**（共 {len(vehicles_list)} 辆可用）\n\n"
                     f"📋 您可以：\n"
                     f"  • 点下方 [选 N] 按钮快速选中（推荐新手）\n"
                     f"  • 或直接报车辆编号（如 PNV001）\n"
                     f"💡 时长：{pending_now.duration_minutes} 分钟")
+        elif recommendations:
+            card = _build_recommendation_card(recommendations, pending_now)
+            from collections import Counter
+            type_counts = Counter(
+                v.get("vehicle_type_detail") or v.get("vehicle_type") or "未知车型"
+                for v in recommendations
+            )
+            top_types = type_counts.most_common(5)
+            type_lines = "\n".join(
+                f"  • **{t}**（{n} 辆可用）" for t, n in top_types)
+            text = (
+                f"📋 **第 4/8 步：选择车辆**（您选的车型暂无）\n\n"
+                f"❌ 您选的 {pending_now.vehicle_type_detail or pending_now.vehicle_type} · "
+                f"{pending_now.chip or '未选芯片'} 当前无车。\n\n"
+                f"💡 **同芯片（{pending_now.chip or '未选'}）下，您车组可用的车型**：\n"
+                f"{type_lines}\n\n"
+                f"💡 建议：\n"
+                f"  ① 点下方车型按钮直接切换（chip 保持 {pending_now.chip}）\n"
+                f"  ② 或返回上一步换个芯片平台\n"
+                f"  ③ 或换个车型重新查\n\n"
+                f"🚪 说「算了/取消」可退出本次约车"
+            )
         else:
+            card = _cb.build_vehicles_card([], query_label=query_label)
             alt_chips = [c for c in CHIP_BUTTONS if c != pending_now.chip]
             text = (
-                f"📋 **第 4/8 步：选择车辆**（暂无）\n\n"
-                f"❌ 已选 {pending_now.vehicle_type_detail or pending_now.vehicle_type} · "
-                f"{pending_now.chip or '未选芯片'} 当前没有可用车辆。\n\n"
-                f"💡 建议方案（按推荐度排序）：\n"
-                f"  ① 换芯片平台（如 {alt_chips[0] if alt_chips else '其他芯片'}）\n"
-                f"  ② 换个车型重新查\n"
-                f"  ③ 换个时长试试\n\n"
+                f"📋 **第 4/8 步：选择车辆**（您车组暂无）\n\n"
+                f"❌ 您所在车组当前没有可用车辆。\n\n"
+                f"💡 建议：\n"
+                f"  ① 换个芯片平台（如 {alt_chips[0] if alt_chips else '其他芯片'}）\n"
+                f"  ② 换个时长试试\n"
+                f"  ③ 联系调度员确认您车组的车是否都借出\n\n"
                 f"🚪 说「算了/取消」可退出本次约车"
             )
         return STATE_SELECT_FROM_LIST, {

@@ -615,6 +615,29 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
 ]
 
 
+def _fetch_vehicles_recommendations(car_handlers_module, user_id: str) -> list:
+    """2026-06-18 查可用车辆空态推荐：调用 fetch_available_vehicles（无 filter）拿车组全量。
+
+    给 handler._try_fast_path「查可用车辆」无车时复用。
+    """
+    try:
+        raw = car_handlers_module.fetch_available_vehicles({})
+        if isinstance(raw, str):
+            parsed = json.loads(raw) if raw else {}
+        else:
+            parsed = raw
+        if isinstance(parsed, dict):
+            items = (parsed.get("items") or parsed.get("vehicles")
+                     or parsed.get("data") or [])
+        elif isinstance(parsed, list):
+            items = parsed
+        else:
+            items = []
+        return [v for v in items if isinstance(v, dict)]
+    except Exception:
+        return []
+
+
 def _try_fast_path(text: str, user_id: str, role: int) -> Optional[dict]:
     norm = text.strip()
     if not norm:
@@ -663,6 +686,12 @@ def _try_fast_path(text: str, user_id: str, role: int) -> Optional[dict]:
             if tool_name == "fetch_available_vehicles":
                 # parsed 可能是 list[dict]（vehicle 列表）或 dict（错误）
                 vehicles = parsed if isinstance(parsed, list) else []
+                # 2026-06-18 优化：用户查可用车辆时如果为空，推荐同车组可用车型。
+                # 用 fetch_available_vehicles 三级 fallback（与 FSM 同源）。
+                recommendations = []
+                if not vehicles:
+                    rec = _fetch_vehicles_recommendations(car_handlers, user_id)
+                    recommendations = rec
                 # 缓存到 car_state（供"约第N个" / "约XX" 文本选择路径反查）
                 car_state.save(
                     user_id,
@@ -677,6 +706,21 @@ def _try_fast_path(text: str, user_id: str, role: int) -> Optional[dict]:
                 if args.get("platform"):
                     ql_parts.append(f"{args['platform']}芯片")
                 query_label = " · ".join(ql_parts) if ql_parts else None
+                if vehicles:
+                    card = car_card_builder.build_vehicles_card(
+                        vehicles, query_label=query_label)
+                    return {"card": card, "text": None, "blocked": False}
+                if recommendations:
+                    # 复用 FSM 的 recommendation 卡 builder（保持 UX 一致）
+                    from bot.car_booking_fsm import _build_recommendation_card
+                    fake_pending = type("_P", (), {
+                        "vehicle_type_detail": args.get("vehicleTypeDetail") or args.get("vehicle_type_detail") or "",
+                        "vehicle_type": args.get("vehicleType") or args.get("vehicle_type") or "",
+                        "chip": args.get("platform") or "",
+                    })()
+                    card = _build_recommendation_card(recommendations, fake_pending)
+                    return {"card": card, "text": None, "blocked": False}
+                # 真无车 — 用 card_builder 默认空态
                 card = car_card_builder.build_vehicles_card(
                     vehicles, query_label=query_label)
                 return {"card": card, "text": None, "blocked": False}
