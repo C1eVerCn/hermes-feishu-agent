@@ -161,16 +161,26 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
         try:
             raw = fetch_user_reservation({})
             result = json.loads(raw) if isinstance(raw, str) else raw
+            # 2026-06-18 fix：fetch_user_reservation 返 List[Reservation]（直接 list），
+            # 不再是 dict 包 "items"/"data"。兼容两种格式。
             if isinstance(result, dict) and "error" in result:
                 return (f"查询预约失败：{result['error']}", None)
-            items = (result.get("items") or result.get("data") or
-                     result.get("reservations") or [])
+            if isinstance(result, list):
+                items = result
+            elif isinstance(result, dict):
+                items = (result.get("items") or result.get("data")
+                         or result.get("reservations") or [])
+            else:
+                items = []
             if not isinstance(items, list):
                 items = []
             if not items:
-                return ("📋 暂无预约记录", {"text": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"})
+                return ("📋 暂无预约记录",
+                        {"text": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"})
             lines = [f"📋 您共有 {len(items)} 条预约：\n"]
             for r in items:
+                if not isinstance(r, dict):
+                    continue
                 vno = r.get("vehicle_no") or r.get("车辆编号") or "?"
                 st = r.get("start_time") or r.get("开始时间") or "?"
                 et = r.get("end_time") or r.get("结束时间") or "?"
