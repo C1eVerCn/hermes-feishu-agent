@@ -136,31 +136,11 @@ def _card_wrap(body_elements: list[dict], *, wide: bool = True) -> dict:
     特性，飞书 Card 1.0 schema 会静默忽略 select_static 元素；之前 _type_card
     /_chip_card 用了 1.0 结构 → 用户只看到 div 文字，看不到下拉）。
 
-    Card 2.0 也不支持 `tag: "action"` 容器（旧 Card 1.0 用 `{"tag":"action","actions":[btn1,btn2]}`
-    包多个 button；Card 2.0 要求 button 直接作为 body.elements 元素）—— 飞书
-    server 返回 ErrCode 200861 "unsupported tag action"。本 helper 自动展平
-    action 容器，调用方写 Card 1.0 风格也能正确发 Card 2.0。
-
-    2026-06-18 修复：之前返回 `{"card": <v2>}` 多包一层，与 _card_base 不一致
-    也与飞书 raw callback 期望冲突。飞书回调 raw `data` 期望直接是 Card 2.0 dict
-    （{schema, config, body}），多一层 "card" 键会导致飞书找不到 schema 字段，
-    卡片内的 button / select_static 都不渲染。改为直接返回 Card 2.0 dict（与
-    _card_base 一致）。
+    2026-06-24 review fix：委托给 car_tools.card_builder._card_base（单一事实源），
+    之前两份 Card 2.0 wrapper 代码会各自漂移。
     """
-    flat: list[dict] = []
-    for e in body_elements:
-        if isinstance(e, dict) and e.get("tag") == "action" and isinstance(e.get("actions"), list):
-            flat.extend(e["actions"])
-        else:
-            flat.append(e)
-    card: dict = {
-        "schema": "2.0",
-        "config": {},
-        "body": {"elements": flat},
-    }
-    if wide:
-        card["config"]["wide_screen_mode"] = True
-    return card
+    from car_tools import card_builder as _cb
+    return _cb._card_base(body_elements)
 
 
 def _entry_card() -> dict:
@@ -606,8 +586,14 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     # INPUT_LOCATION / CONFIRM 会因非相关输入被误判为"未识别时段"等）——
     # 截图 19/20 显示用户发"查询我的审批记录"被误判为"未识别时段"，让用户
     # 能 escape 后重发查询更自然。
+    # 2026-06-24 review fix：CONFIRM 状态有自己的"取消"处理（清预约信息+回 START），
+    # 不应该被全局 escape 屏蔽——后者会把 CONFIRM 的 [❌ 取消] 按钮走错路径。
+    # 因此 ESCAPE 只对"等待用户输入"型状态触发；CONFIRM 走自己的分支。
     ESCAPE_PHRASES = ("算了", "取消", "退出", "不约了", "放弃", "不选了")
-    if text.strip() in ESCAPE_PHRASES and current_state not in ("", STATE_START):
+    ESCAPE_STATES = (STATE_DURATION_CONFIRM, STATE_SELECT_TIME,
+                     STATE_INPUT_TASK, STATE_INPUT_LOCATION)
+    if (text.strip() in ESCAPE_PHRASES
+            and current_state in ESCAPE_STATES):
         car_state.clear(user_id)
         return STATE_START, _entry_card()
 

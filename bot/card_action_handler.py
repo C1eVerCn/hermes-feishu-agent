@@ -156,6 +156,8 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
         from car_tools.handlers import fetch_user_reservation
         from ocl.tool_guard import set_current_caller, CallerIdentity
         from ocl import identity as _ident
+        from car_tools import card_builder as car_card_builder
+        from bot.car_booking_fsm import _card_wrap
         email = _ident.email_of(open_id)
         set_current_caller(CallerIdentity(openid=open_id, email=email or ""))
         try:
@@ -174,19 +176,19 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
                 items = []
             if not isinstance(items, list):
                 items = []
-            if not items:
+            n = len(items)
+            # 2026-06-24 review fix：渲染 Card 2.0 卡（之前返 {"text":...} 字典
+            # 让 Lark 显示空白 toast）。复用 _build_records_card 保证 LLM agent 路径
+            # 跟 card-action 路径渲染一致。
+            if not n:
                 return ("📋 暂无预约记录",
-                        {"text": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"})
-            lines = [f"📋 您共有 {len(items)} 条预约：\n"]
-            for r in items:
-                if not isinstance(r, dict):
-                    continue
-                vno = r.get("vehicle_no") or r.get("车辆编号") or "?"
-                st = r.get("start_time") or r.get("开始时间") or "?"
-                et = r.get("end_time") or r.get("结束时间") or "?"
-                stt = r.get("status") or r.get("状态") or "未知"
-                lines.append(f"• {vno} {st} ~ {et}（{stt}）")
-            return ("📋 您的预约", {"text": "\n".join(lines)})
+                        _card_wrap([{"tag": "div", "text": {
+                            "tag": "lark_md",
+                            "content": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"
+                        }}]))
+            card = car_card_builder._build_records_card(
+                items, title=f"📋 我的预约（共 {n} 条）")
+            return ("📋 您的预约", card)
         except Exception as e:
             log.warning("fsm_done_records failed: %s", e)
             return (f"查询预约失败：{e}", None)

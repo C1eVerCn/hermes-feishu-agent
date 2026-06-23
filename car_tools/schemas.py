@@ -11,7 +11,7 @@
 """
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # 芯片平台枚举（MCP 边界传字符串；内部 Pydantic 用 Literal 强约束）
 Platform = Literal["Xavier", "ADCU", "Orin", "Thor"]
@@ -59,11 +59,13 @@ class Reservation(_Strict):
 class ReservationResult(_Strict):
     """single_vehicle_reservation 成功返回值。
 
-    2026-06-18 fix：dmz-fmp-mcp 上游响应字段不可靠：
-    - platform 字段可能缺失/空（fmp 端 Vehicle 表反查，但 fmp-mcp 没传 platform args）
-    - vehicle_no / vehicle_type / start_time / end_time / task_name / location
-      在 fmp response 里可能为空字符串
-    改为 Optional/默认值让 Pydantic 容错；success: True 表明预约成功。
+    2026-06-18 fix：dmz-fmp-mcp 上游响应字段不可靠（fmp-mcp 序列化丢字段）。
+    2026-06-24 review fix：之前把 task_name / location / vehicle_no 等都改 Optional
+    后，fmp 返 success=True 但 task_name='' 时静默通过，SUCCESS 卡显示空字段
+    但用户以为预约成功。修复：
+    - 字段保持 Optional（容忍空字符串），但 model_validator 强制 success=True
+      时必须至少有 vehicle_no / start_time / end_time / task_name / location
+      五个非空字段，否则抛 NormalizeError 让上游返 500 给用户清晰提示。
     """
     success: bool
     vehicle_no: Optional[str] = None
@@ -81,6 +83,18 @@ class ReservationResult(_Strict):
     applicant_email: Optional[str] = None
     applicant_open_id: Optional[str] = None
     applicant_mobile: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _check_required_on_success(self):
+        if not self.success:
+            return self
+        missing = [k for k in ("vehicle_no", "start_time", "end_time",
+                               "task_name", "location")
+                   if not (getattr(self, k) or "").strip()]
+        if missing:
+            raise ValueError(
+                f"single_vehicle_reservation 返 success=True 但缺字段: {missing}")
+        return self
 
 
 class ApprovalResult(_Strict):

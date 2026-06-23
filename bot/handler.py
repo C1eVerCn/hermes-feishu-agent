@@ -289,6 +289,11 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
                 else:
                     sender.send_text_as_card(chat_id, fast.get("text") or _ERROR_REPLY)
                 return
+            # 2026-06-24 review fix：fast-path 没匹配（regex 漂移或权限不足）
+            # 时不能 silently fallthrough 到 LLM agent。给用户清晰提示并继续
+            # 走主 fast-path 分支（line 293），让 LLM 正常处理。
+            sender.send_text_as_card(
+                chat_id, "💡 没找到对应查询工具，正在帮你处理…")
 
     # ── Layer 0.5/0.6: Fast paths（直接调工具，<1s） ─────────────────
     fast = _try_fast_path(text, user_id, role)
@@ -327,13 +332,14 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
             # 2026-06-18 Bug A 修复：text + buttons 走 Card 2.0 渲染（可点击按钮），
             # 之前拼成 "· 文本" 纯文本行（飞书看不到点击按钮）。
             # 复用 card_action_handler._render_fsm_response 的逻辑。
+            # 2026-06-24 review fix：去掉残留的 `text_lines` 引用（之前那行是 Bug A
+            # 修过的拼接死代码，会 NameError）。
             from bot.card_action_handler import _render_fsm_response
             _toast, _card = _render_fsm_response(response)
             if _card is not None:
                 sender.send_card(chat_id, _card)
             else:
                 sender.send_text_as_card(chat_id, response.get("text", ""))
-            sender.send_text_as_card(chat_id, "\n".join(s for s in text_lines if s))
         else:
             sender.send_text_as_card(chat_id, _ERROR_REPLY)
         return
@@ -547,22 +553,24 @@ _TYPE_KEYWORDS = (
 
 # 2026-06-18 Bug B 修复：用户在 FSM 挂起状态下输入查询类语句（想改主意
 # 查"我的预约"）时，应该清 FSM 状态走 fast-path，而不是把整句当 task_name。
-_QUERY_INTENT_DURING_FSM = (
-    re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下)?\s*(一下\s*)?我的\s*(预约记录|预约|所有预约|预约历史|约车记录)[\s!！。.]*$'),
-    re.compile(r'^(查询|查看|查|看看|帮我查|帮我看)?\s*(我的)?\s*(待审批列表|待审批|待我审批|审批列表|审批记录|待审批记录)[\s!！。.]*$'),
-    re.compile(r'^(查询|查看|看看|有什么|列出|看|查)(\s*(所有|可用))?\s*(车辆|车)(\s*(列表|号))?[\s!！。.]*$'),
-    re.compile(r'^车辆(\s*(列表))?[\s!！。.]*$'),
-    re.compile(r'^我的\s*(权限|角色|身份)[\s!！。.]*$'),
-)
+# 2026-06-24 review fix：不再单独维护正则集合——复用 _FAST_PATH_PATTERNS
+# 同一份 pattern（single source of truth），加 .search() 匹配而非 .match()。
+# 新加任何 fast-path 查询工具时，自动在 in-fsm escape 也生效。
+_FSM_ESCAPE_EXEMPT = ("fetch_available_vehicles",)  # 车辆查询不 escape（用户可能想进 booking）
 
 
 def _match_query_intent_during_fsm(text: str) -> bool:
-    """用户在 FSM 挂起状态时输入查询类语句 → 返回 True 让 handler 清状态走 fast-path。"""
+    """用户在 FSM 挂起状态时输入查询类语句 → 返回 True 让 handler 清状态走 fast-path。
+    复用 _FAST_PATH_PATTERNS 任一 pattern（除 fetch_available_vehicles 外）；
+    新加查询工具自动同步 escape 行为。
+    """
     norm = (text or "").strip()
     if not norm:
         return False
-    for pat in _QUERY_INTENT_DURING_FSM:
-        if pat.match(norm):
+    for pattern, tool_name, _args_fn in _FAST_PATH_PATTERNS:
+        if tool_name in _FSM_ESCAPE_EXEMPT:
+            continue
+        if pattern.search(norm):
             return True
     return False
 

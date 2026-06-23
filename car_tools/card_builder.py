@@ -206,14 +206,8 @@ def build_success_card(result: dict) -> dict:
     已接管（_handle_select_vehicle → fsm.advance → DURATION_CONFIRM 选时段 →
     INPUT_TASK → INPUT_LOCATION → CONFIRM → COMMIT）。仅被
     test_car_card_builder.py 用，生产无 caller。
+    2026-06-24 review fix：去重 dispatchers 块（之前 line 210-223 完全重复两份）。
     """
-    dispatchers = result.get("dispatchers") or []
-    dispatcher_text = "（无）"
-    if dispatchers:
-        dispatcher_text = "\n".join(
-            f"• {d.get('name','')} ({d.get('email','')})"
-            for d in dispatchers
-        )
     dispatchers = result.get("dispatchers") or []
     dispatcher_text = "（无）"
     if dispatchers:

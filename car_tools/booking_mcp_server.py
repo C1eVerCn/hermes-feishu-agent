@@ -155,29 +155,6 @@ async def _do_call(tool_name: str, arguments: dict) -> dict:
     # unreachable, but mypy 友好
     raise last_exc if last_exc else RuntimeError("fmp_mcp call failed")
 
-    texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
-    if not texts:
-        log.warning("fmp_mcp_empty_text tool=%s args=%s", tool_name, arguments)
-        return {"code": 500, "message": "上游返回空", "data": None}
-    raw_text = texts[0]
-    # dmz-fmp-mcp (Spring AI MCP) 双层 JSON 序列化
-    parsed: Any = raw_text
-    if isinstance(parsed, str):
-        try:
-            envelope = json.loads(parsed)
-        except (json.JSONDecodeError, ValueError):
-            envelope = None
-        if isinstance(envelope, dict) and isinstance(envelope.get("text"), str):
-            try:
-                parsed = json.loads(envelope["text"])
-            except (json.JSONDecodeError, ValueError):
-                parsed = envelope["text"]
-        elif envelope is not None:
-            parsed = envelope
-    if not isinstance(parsed, dict):
-        return {"raw": parsed}
-    return parsed
-
 
 def _parse_tool_result(result, tool_name: str, arguments: dict) -> dict:
     """从 ClientSession.call_tool() 返回值解析业务 JSON。"""

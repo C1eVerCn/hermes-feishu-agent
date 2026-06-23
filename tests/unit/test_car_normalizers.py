@@ -192,17 +192,37 @@ def test_normalize_reservation_result_injects_applicant():
     assert out.applicant_email == "x@y.com"
 
 
-def test_normalize_reservation_result_tolerates_missing_fields():
-    """2026-06-18 fix：fmp 上游 response 字段不可靠（platform/vehicle_no 等常为空），
-    ReservationResult 字段改 Optional/默认值。normalize 不再 raise NormalizeError。"""
+def test_normalize_reservation_result_rejects_missing_required_fields():
+    """2026-06-24 review fix：之前把 task_name / location / start_time / end_time
+    都改 Optional，fmp 返 success=True 但 task_name='' 时静默通过，
+    SUCCESS 卡显示「任务：」空白但用户以为预约成功。修复：normalize 在
+    success=True 时强制要求 vehicle_no / start_time / end_time / task_name /
+    location 五个字段非空，否则抛 NormalizeError 让上游返 500。
+    """
+    with pytest.raises(normalizers.NormalizeError) as exc_info:
+        normalizers.normalize_reservation_result({
+            "vehicleNo": "PNV332",
+            # vehicleType / platform / startTime / endTime / taskName / location 都缺
+        })
+    # 错误信息提示缺哪些字段
+    assert "缺字段" in str(exc_info.value)
+
+
+def test_normalize_reservation_result_accepts_full_fields():
+    """2026-06-24：success=True + 必填字段全有 → 正常通过。"""
     out = normalizers.normalize_reservation_result({
         "vehicleNo": "PNV332",
-        # vehicleType / platform / startTime / endTime / taskName / location 都缺
+        "vehicleType": "DM0",
+        "platform": "Xavier",
+        "startTime": "2026-06-25 10:00",
+        "endTime":   "2026-06-25 11:00",
+        "taskName":  "MFF调试",
+        "location":  "上海",
     })
-    # 缺 success → normalize 默认 True（不抛错）
     assert out.success is True
-    assert out.vehicle_no == "PNV332"  # 显式传入的值保留
-    assert out.vehicle_type == ""  # 缺字段 → normalize 填空字符串（容错）
+    assert out.vehicle_no == "PNV332"
+    assert out.task_name == "MFF调试"
+    assert out.location == "上海"
 
 
 # ── normalize_approval_result ──────────────────────────────────────────────
