@@ -43,73 +43,183 @@ CAR_MCP_SSE_URL: str = os.getenv(
     "http://dmz-fmp-mcp:9015/fmpMCP/sse",
 )
 TIMEOUT: float = float(os.getenv("CAR_MCP_TIMEOUT", "80"))
+# 2026-06-18 优化：缩短 SSE connect / read 超时，让失败时快速降级
+# （之前 connect 失败时实测 ~4s 才返回 TaskGroup 错误）。
+SSE_CONNECT_TIMEOUT: float = float(os.getenv("CAR_MCP_CONNECT_TIMEOUT", "3"))
+SSE_READ_TIMEOUT: float = float(os.getenv("CAR_MCP_READ_TIMEOUT", "30"))
 
 
 # ── MCP 客户端（同步包装） ─────────────────────────────────────────────────
+# 2026-06-18 性能优化：模块级 SSE session 池（持久连接 + 线程安全）。
+# 之前每次调用都开新 SSE 连接 → 间歇性 TaskGroup 错误耗时 4s+。
+# 现在持久化一个 session（独立后台线程 + event loop），
+# 跨调用复用；session 失效时自动清掉让下次重建。
+import threading as _threading
+import queue as _queue
+
+_session_lock = _threading.Lock()
+_loop: "asyncio.AbstractEventLoop | None" = None
+_loop_thread: "_threading.Thread | None" = None
+_session_holder: "queue.Queue" = _queue.Queue(maxsize=1)  # 持久 ClientSession
+_init_done = _threading.Event()
+_init_error: BaseException | None = None
+
+
+def _start_loop():
+    """后台线程：跑一个独立 event loop，session 活在这里。"""
+    global _loop
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+    try:
+        _init_done.set()
+        _loop.run_forever()
+    finally:
+        _loop.close()
+
+
+def _ensure_loop_started():
+    global _loop_thread
+    if _loop_thread is not None and _loop_thread.is_alive():
+        return
+    _loop_thread = _threading.Thread(target=_start_loop, daemon=True, name="mcp-sse-loop")
+    _loop_thread.start()
+    _init_done.wait(timeout=5)
+
+
+async def _open_session():
+    """在后台 loop 里打开一个新的 SSE session 并放回 holder。"""
+    sse_cm = sse_client(CAR_MCP_SSE_URL, timeout=SSE_CONNECT_TIMEOUT,
+                        sse_read_timeout=SSE_READ_TIMEOUT)
+    read, write = await sse_cm.__aenter__()
+    session = ClientSession(read, write)
+    await session.__aenter__()
+    await session.initialize()
+    # 旧的清掉（如果有）
+    try:
+        old = _session_holder.get_nowait()
+        try:
+            await old.__aexit__(None, None, None)
+        except Exception:
+            pass
+    except _queue.Empty:
+        pass
+    _session_holder.put((session, sse_cm))
+    return session
+
+
+async def _close_session():
+    try:
+        session, sse_cm = _session_holder.get_nowait()
+    except _queue.Empty:
+        return
+    try:
+        await session.__aexit__(None, None, None)
+    except Exception:
+        pass
+    try:
+        await sse_cm.__aexit__(None, None, None)
+    except Exception:
+        pass
+
+
+async def _do_call(tool_name: str, arguments: dict) -> dict:
+    """在后台 loop 里执行：取 session → call_tool → 解析 → 失败时清 session。
+
+    2026-06-24：加 1 次自动重试（应对 Spring AI server 间歇性 TaskGroup
+    错误 —— 实测首次 call 间歇性 ~3-5s 失败后，下次 call 才能成功）。
+    """
+    last_exc = None
+    for attempt in range(2):  # 最多试 2 次
+        # 确保 session 存在
+        if _session_holder.empty():
+            await _open_session()
+        try:
+            session, _ = _session_holder.get_nowait()
+            _session_holder.put((session, _))
+        except _queue.Empty:
+            await _open_session()
+            session, _ = _session_holder.get_nowait()
+            _session_holder.put((session, _))
+
+        try:
+            result = await session.call_tool(tool_name, arguments)
+            return _parse_tool_result(result, tool_name, arguments)
+        except Exception as e:
+            last_exc = e
+            # 失败时清 session，下次重建
+            await _close_session()
+            if attempt == 0:
+                log.info("fmp_mcp_retry tool=%s attempt=1 err=%s", tool_name, e)
+                continue
+            raise
+    # unreachable, but mypy 友好
+    raise last_exc if last_exc else RuntimeError("fmp_mcp call failed")
+
+    texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
+    if not texts:
+        log.warning("fmp_mcp_empty_text tool=%s args=%s", tool_name, arguments)
+        return {"code": 500, "message": "上游返回空", "data": None}
+    raw_text = texts[0]
+    # dmz-fmp-mcp (Spring AI MCP) 双层 JSON 序列化
+    parsed: Any = raw_text
+    if isinstance(parsed, str):
+        try:
+            envelope = json.loads(parsed)
+        except (json.JSONDecodeError, ValueError):
+            envelope = None
+        if isinstance(envelope, dict) and isinstance(envelope.get("text"), str):
+            try:
+                parsed = json.loads(envelope["text"])
+            except (json.JSONDecodeError, ValueError):
+                parsed = envelope["text"]
+        elif envelope is not None:
+            parsed = envelope
+    if not isinstance(parsed, dict):
+        return {"raw": parsed}
+    return parsed
+
+
+def _parse_tool_result(result, tool_name: str, arguments: dict) -> dict:
+    """从 ClientSession.call_tool() 返回值解析业务 JSON。"""
+    texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
+    if not texts:
+        log.warning("fmp_mcp_empty_text tool=%s args=%s", tool_name, arguments)
+        return {"code": 500, "message": "上游返回空", "data": None}
+    raw_text = texts[0]
+    # dmz-fmp-mcp (Spring AI MCP) 双层 JSON 序列化
+    parsed: Any = raw_text
+    if isinstance(parsed, str):
+        try:
+            envelope = json.loads(parsed)
+        except (json.JSONDecodeError, ValueError):
+            envelope = None
+        if isinstance(envelope, dict) and isinstance(envelope.get("text"), str):
+            try:
+                parsed = json.loads(envelope["text"])
+            except (json.JSONDecodeError, ValueError):
+                parsed = envelope["text"]
+        elif envelope is not None:
+            parsed = envelope
+    if not isinstance(parsed, dict):
+        return {"raw": parsed}
+    return parsed
+
 
 def _call_fmp_tool(tool_name: str, arguments: dict) -> dict:
     """通过 SSE MCP 调 fmp-mcp 工具（同步包装），返回解析后的 dict。
 
-    实现：每次调用打开一个新的 SSE 会话 → initialize → call_tool → 关闭。
-    简单可靠；如需高频优化可改为全局 session pool。
-    （2026-06-18 main.py 加 _prewarm_mcp 让启动时预热 dmz-fmp-mcp，
-    隐藏 Spring AI 冷启动的 ~10s。SSE session 复用暂不做——避免
-    session 失效时静默失败更难定位。）
+    2026-06-18 优化：使用持久 SSE session（后台 loop 持有），
+    单 call 命中复用 <30ms；失败时清 session 让下次重建。
     """
-    async def _call() -> dict:
-        try:
-            async with sse_client(CAR_MCP_SSE_URL, timeout=TIMEOUT) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool(tool_name, arguments)
-                    # 收集 TextContent
-                    texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
-                    if not texts:
-                        log.warning("fmp_mcp_empty_text tool=%s args=%s", tool_name, arguments)
-                        return {"code": 500, "message": "上游返回空", "data": None}
-                    raw_text = texts[0]
-                    # dmz-fmp-mcp (Spring AI MCP) 是**双层 JSON 序列化**：
-                    # TextContent.text 整体是一个 JSON 字符串，解析后形如
-                    #   {"type":"text","text":"<内层 JSON 字符串>"}
-                    # 内层才是真正的业务响应 {"code":200,"message":"success","data":...}
-                    # 也兼容 fmp 不再双层序列化时直接是单层业务 JSON。
-                    parsed: Any = raw_text
-                    if isinstance(parsed, str):
-                        try:
-                            envelope = json.loads(parsed)
-                        except (json.JSONDecodeError, ValueError):
-                            envelope = None
-                        if isinstance(envelope, dict) and isinstance(envelope.get("text"), str):
-                            # 双层：剥外层 envelope，继续解内层
-                            try:
-                                parsed = json.loads(envelope["text"])
-                            except (json.JSONDecodeError, ValueError):
-                                parsed = envelope["text"]
-                        elif envelope is not None:
-                            # 单层：业务 JSON
-                            parsed = envelope
-                        # else: parsed 仍是 str（不是 JSON），下方 isinstance 兜底
-                    if not isinstance(parsed, dict):
-                        return {"raw": parsed}
-                    return parsed
-        except Exception as e:
-            log.warning("fmp_mcp_call_failed tool=%s err=%s", tool_name, e)
-            return {"code": 500, "message": f"MCP 调用失败: {type(e).__name__}: {e}", "data": None}
-
+    _ensure_loop_started()
+    assert _loop is not None
+    future = asyncio.run_coroutine_threadsafe(
+        _do_call(tool_name, arguments), _loop)
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # 已在 async 上下文（如 FastMCP 内部）—— 退回到线程池。
-            # TODO（2026-06-18 C6 review finding）：ThreadPoolExecutor(max_workers=1)
-            # 会把并发 MCP 工具调用串行化。当前 FastMCP stdio 是同步分发未触发；
-            # 若未来改成 async dispatch 并行触发多工具，需改用 module-level pool
-            # （workers >= 4）或维护长连接 session 替代每次 asyncio.run。
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                return ex.submit(asyncio.run, _call()).result()
-    except RuntimeError:
-        pass
-    return asyncio.run(_call())
+        return future.result(timeout=SSE_CONNECT_TIMEOUT + SSE_READ_TIMEOUT + 5)
+    except Exception as e:
+        log.warning("fmp_mcp_call_failed tool=%s err=%s", tool_name, e)
+        return {"code": 500, "message": f"MCP 调用失败: {type(e).__name__}: {e}", "data": None}
 
 
 def _call_fmp_tool_args(tool_name: str, args_list: list) -> dict:

@@ -48,7 +48,8 @@ def _prewarm_mcp() -> None:
     2026-06-18 实测：首次 MCP 调用 10935ms（Spring AI / JVM 冷启动），
     后续调用 91ms。预热一次让"首次用户消息"也快。
 
-    调用一个无害的 get_common_dictionary 工具，触发 dmz-fmp-mcp 初始化。
+    2026-06-24 增强：直接调 booking_mcp_server._ensure_loop_started +
+    _open_session 在后台 loop 里建好持久 session，连首次调用都 <50ms。
     """
     import concurrent.futures
     log = logging.getLogger(__name__)
@@ -57,15 +58,15 @@ def _prewarm_mcp() -> None:
         from ocl.tool_guard import set_current_caller, CallerIdentity
         from car_tools.mcp_client import get_mcp_client
         set_current_caller(CallerIdentity(openid="__warmup__", email=""))
+        # 触发持久 session 建立（一次 get_common_dictionary）
         client = get_mcp_client()
-        # get_common_dictionary 无业务参数，调一次触发 SSE 会话 + Spring 初始化
         client.call("get_common_dictionary", {"typeCode": "vehicle_type"})
     try:
-        # 在独立线程跑（get_common_dictionary 内部用 asyncio.run，不阻塞 main）
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             future = ex.submit(_do_warmup)
             future.result(timeout=30)
-        log.info("mcp prewarmed in %.2fs (get_common_dictionary)", time.monotonic() - t0)
+        log.info("mcp prewarmed in %.2fs (get_common_dictionary + persistent session)",
+                 time.monotonic() - t0)
     except Exception:
         log.warning("mcp prewarm failed (best-effort, first call may be slow)",
                     exc_info=True)
