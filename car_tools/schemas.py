@@ -60,12 +60,13 @@ class ReservationResult(_Strict):
     """single_vehicle_reservation 成功返回值。
 
     2026-06-18 fix：dmz-fmp-mcp 上游响应字段不可靠（fmp-mcp 序列化丢字段）。
-    2026-06-24 review fix：之前把 task_name / location / vehicle_no 等都改 Optional
-    后，fmp 返 success=True 但 task_name='' 时静默通过，SUCCESS 卡显示空字段
-    但用户以为预约成功。修复：
-    - 字段保持 Optional（容忍空字符串），但 model_validator 强制 success=True
-      时必须至少有 vehicle_no / start_time / end_time / task_name / location
-      五个非空字段，否则抛 NormalizeError 让上游返 500 给用户清晰提示。
+    2026-06-24 review fix #4：之前把 task_name / location 等都改 Optional 后，
+    fmp 返 success=True 但 task_name='' 时静默通过。修复：model_validator
+    强制 success=True 时校验必填字段。
+    2026-06-24 hotfix：实测 fmp 实际行为是 code=200 + data=null
+    （sparse success response），所有字段都是 None。如果要求 5 字段全填
+    会误伤所有真实预约（user 截图显示"提交失败：缺字段"）。
+    放宽到只校验 vehicle_no（最关键标识），其他字段允许 None。
     """
     success: bool
     vehicle_no: Optional[str] = None
@@ -86,14 +87,13 @@ class ReservationResult(_Strict):
 
     @model_validator(mode="after")
     def _check_required_on_success(self):
+        # 只校验 vehicle_no（fmp 实际行为：code=200 但 data=null 稀疏成功，
+        # 其他字段允许 None —— 用户在 car_state 里仍有完整数据用于显示）
         if not self.success:
             return self
-        missing = [k for k in ("vehicle_no", "start_time", "end_time",
-                               "task_name", "location")
-                   if not (getattr(self, k) or "").strip()]
-        if missing:
+        if not (self.vehicle_no or "").strip():
             raise ValueError(
-                f"single_vehicle_reservation 返 success=True 但缺字段: {missing}")
+                "single_vehicle_reservation 返 success=True 但缺关键字段 vehicle_no")
         return self
 
 

@@ -312,7 +312,11 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     in_fsm = pending_state and pending_state.state not in ("", "START")
 
     BOOKING_INTENT = ("我想约车", "我要约车", "帮我约车", "约车", "预约车",
-                      "帮我预约", "我想预约")
+                      "帮我预约", "我想预约",
+                      # 2026-06-24 扩展：覆盖"我现在想约车/想约一辆"等口语化变体
+                      "我现在想约车", "我想约一辆", "我要约一辆",
+                      "想约车", "想约一辆车", "要约车", "约个车",
+                      "想预约车", "想预约一辆车")
     norm = text.strip()
     # "报编号"快捷路径：字母+数字 5-9 字符（spec §3.3 START 路径）
     is_vehicle_id = bool(re.match(r"^[A-Za-z]{2,5}\d{3,6}$", norm))

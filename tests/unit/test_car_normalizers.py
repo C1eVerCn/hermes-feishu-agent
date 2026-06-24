@@ -192,24 +192,37 @@ def test_normalize_reservation_result_injects_applicant():
     assert out.applicant_email == "x@y.com"
 
 
-def test_normalize_reservation_result_rejects_missing_required_fields():
-    """2026-06-24 review fix：之前把 task_name / location / start_time / end_time
-    都改 Optional，fmp 返 success=True 但 task_name='' 时静默通过，
-    SUCCESS 卡显示「任务：」空白但用户以为预约成功。修复：normalize 在
-    success=True 时强制要求 vehicle_no / start_time / end_time / task_name /
-    location 五个字段非空，否则抛 NormalizeError 让上游返 500。
+def test_normalize_reservation_result_rejects_missing_vehicle_no():
+    """2026-06-24 review fix：fmp 返 success=True 但 vehicle_no 缺失 → 抛错。
+    2026-06-24 hotfix：放宽到只校验 vehicle_no（其他字段允许 None，
+    fmp sparse response {code:200, data:null} 兼容）。
     """
     with pytest.raises(normalizers.NormalizeError) as exc_info:
         normalizers.normalize_reservation_result({
-            "vehicleNo": "PNV332",
-            # vehicleType / platform / startTime / endTime / taskName / location 都缺
+            "code": 200,
+            "success": True,
+            # vehicleNo 缺失
         })
-    # 错误信息提示缺哪些字段
-    assert "缺字段" in str(exc_info.value)
+    assert "vehicle_no" in str(exc_info.value)
+
+
+def test_normalize_reservation_result_accepts_sparse_success():
+    """2026-06-24 hotfix：fmp 实际返 {code:200, data:null}（sparse success），
+    normalize 必须能处理——vehicle_no 存在 + 其他字段空串。"""
+    out = normalizers.normalize_reservation_result({
+        "code": 200,
+        "vehicleNo": "PNV332",
+        # 其他字段都没有 —— 真实场景
+    })
+    assert out.success is True
+    assert out.vehicle_no == "PNV332"
+    # normalizer 把缺失字段填成 ""（不是 None）
+    assert out.task_name == ""
+    assert out.location == ""
 
 
 def test_normalize_reservation_result_accepts_full_fields():
-    """2026-06-24：success=True + 必填字段全有 → 正常通过。"""
+    """2026-06-24：success=True + 全字段 → 正常通过。"""
     out = normalizers.normalize_reservation_result({
         "vehicleNo": "PNV332",
         "vehicleType": "DM0",
