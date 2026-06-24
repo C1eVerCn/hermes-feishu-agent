@@ -320,16 +320,17 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     norm = text.strip()
     # "报编号"快捷路径：字母+数字 5-9 字符（spec §3.3 START 路径）
     is_vehicle_id = bool(re.match(r"^[A-Za-z]{2,5}\d{3,6}$", norm))
+    # 2026-06-24 强化意图识别：用「intent 动词 + 0-12 字符 + 车辆词」regex
+    # 覆盖口语化变体（"我想要约一辆车"/"请问能帮我预约一下车辆吗"等）。
+    # 否定检测：前 8 字符内出现 不/没/别/无需/算了/取消/不要了 即视为非意图。
+    _intent_verb = "(约|预约|预定|book|schedule|預約|預定)"
+    _vehicle_word = "(车|车辆|vehicle|car|辆\\s*车|辆)"
+    _has_intent = bool(re.search(_intent_verb + r"[\\s\\S]{0,12}" + _vehicle_word, norm))
+    _has_negation = bool(re.search(r"不|没|别|无需|算了|取消|不要了", norm[:8]))
     is_booking_intent = (
         norm in BOOKING_INTENT
-        # 2026-06-24：扩展 startswith 覆盖"我想约辆车/想约车/约个车/想预约"等
-        # 不在 BOOKING_INTENT 列表里但语义明确的变体
-        or norm.startswith((
-            "我要约", "帮我约", "我想约", "想约", "约",
-            "要约", "去约", "来约", "准备约", "打算约", "准备想约"
-        ))
-        # 包含「约车」或「预约车」关键词（覆盖各种变体）
-        or re.search(r"约\s*车|预约\s*车|要\s*辆\s*车|想\s*辆", norm) is not None
+        or norm.startswith(("我要约", "帮我约"))  # 兼容老的快捷路径
+        or (_has_intent and not _has_negation)
         or _is_type_keyword(norm)
         or is_vehicle_id
     )
