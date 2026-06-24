@@ -322,7 +322,14 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     is_vehicle_id = bool(re.match(r"^[A-Za-z]{2,5}\d{3,6}$", norm))
     is_booking_intent = (
         norm in BOOKING_INTENT
-        or norm.startswith(("我要约", "帮我约"))
+        # 2026-06-24：扩展 startswith 覆盖"我想约辆车/想约车/约个车/想预约"等
+        # 不在 BOOKING_INTENT 列表里但语义明确的变体
+        or norm.startswith((
+            "我要约", "帮我约", "我想约", "想约", "约",
+            "要约", "去约", "来约", "准备约", "打算约", "准备想约"
+        ))
+        # 包含「约车」或「预约车」关键词（覆盖各种变体）
+        or re.search(r"约\s*车|预约\s*车|要\s*辆\s*车|想\s*辆", norm) is not None
         or _is_type_keyword(norm)
         or is_vehicle_id
     )
