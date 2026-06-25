@@ -79,6 +79,39 @@ def test_email_still_primary(map_with_mobile):
     assert identity.role_of("ou_a") == 1
 
 
+# ── mobile_of 从飞书 API 解析（开通 contact:user.phone:readonly 后）─────────
+def test_mobile_of_from_feishu_api(tmp_path, monkeypatch):
+    f = tmp_path / "identity_map.json"
+    f.write_text(json.dumps({}))  # identity_map 无 mobile override
+    monkeypatch.setattr(identity, "_MAP_FILE", str(f))
+    identity._invalidate_role_overrides()
+    identity._email_cache.clear()
+    identity._name_cache.clear()
+    identity._mobile_api_cache.clear()
+    identity._miss_cache.clear()
+    # _resolve_open_id 内部已归一化（见 test_normalize_mobile）；这里返回归一化后的值
+    monkeypatch.setattr(identity, "_resolve_open_id",
+                        lambda oid: ("u@x.com", "测试", "13800138000"))
+    assert identity.mobile_of("ou_feishu") == "13800138000"
+
+
+def test_identity_map_mobile_overrides_feishu(tmp_path, monkeypatch):
+    f = tmp_path / "identity_map.json"
+    f.write_text(json.dumps({"ou_o": {"role": 1, "mobile": "13900139000"}}, ensure_ascii=False))
+    monkeypatch.setattr(identity, "_MAP_FILE", str(f))
+    identity._invalidate_role_overrides()
+    identity._mobile_api_cache.clear()
+    monkeypatch.setattr(identity, "_resolve_open_id",
+                        lambda oid: ("u@x.com", "测试", "13800138000"))  # 飞书是另一个号
+    assert identity.mobile_of("ou_o") == "13900139000"  # 管理员设置优先
+
+
+def test_normalize_mobile():
+    assert identity._normalize_mobile("+86 138-0013-8000") == "13800138000"
+    assert identity._normalize_mobile("13800138000") == "13800138000"
+    assert identity._normalize_mobile("") == ""
+
+
 # ── replies：查看用户 <手机号> ─────────────────────────────────────────────
 def test_admin_view_user_by_mobile(monkeypatch, tmp_path):
     from bot import replies, identity_admin

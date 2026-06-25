@@ -156,27 +156,28 @@ def run_mutation(intent_name: str, slots: dict, user_id: str, role: int) -> Opti
         set_current_caller(CallerIdentity())
 
 
-def _build_mutation_args(intent_name: str, slots: dict) -> Optional[dict]:
-    """从 slots 构造 mutation 工具入参；缺必要识别符返回 None。"""
+def build_mutation_args(intent_name: str, slots: dict) -> Optional[dict]:
+    """从 slots 构造 mutation 工具入参；缺 vehicle_no 返回 None。
+
+    2026-06-25 新版上游：cancel/approval 去掉了 reservationId，统一以 vehicleNo(或 vin)
+    为识别符。我们从自然语言只抽 vehicle_no，故三者都要求 vehicle_no。
+    """
     vno = (slots.get("vehicle_no") or "").strip()
-    rid = (slots.get("reservation_id") or "").strip()
-    if intent_name == "cancel":
-        if not vno and not rid:
-            return None
-        return {k: v for k, v in {"vehicleNo": vno, "reservationId": rid}.items() if v}
-    if intent_name == "return":
-        if not vno:
-            return None
-        return {"vehicleNo": vno}
+    if intent_name in ("cancel", "return"):
+        return {"vehicleNo": vno} if vno else None
     if intent_name == "approve":
         approved = slots.get("approved")
-        if (not vno and not rid) or approved is None:
+        if not vno or approved is None:
             return None
-        args = {"vehicleNo": vno, "reservationId": rid, "approved": approved}
+        args = {"vehicleNo": vno, "approved": approved}
         if slots.get("review_comment"):
             args["reviewComment"] = slots["review_comment"]
-        return {k: v for k, v in args.items() if v not in (None, "")}
+        return args
     return None
+
+
+# 向后兼容别名（旧测试引用 _build_mutation_args）
+_build_mutation_args = build_mutation_args
 
 
 def _mutation_success_text(intent_name: str, slots: dict) -> str:

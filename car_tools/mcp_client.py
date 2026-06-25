@@ -23,6 +23,22 @@ from config.settings import settings
 log = logging.getLogger(__name__)
 
 
+def _filter_to_signature(fn, args: dict) -> dict:
+    """只保留 fn 显式声明的参数名（FastMCP 的 @mcp.tool() 包装后仍可 inspect）。
+
+    若 fn 声明了 **kwargs 则不过滤（全部透传）。无法 inspect 时退化为不过滤。
+    """
+    try:
+        import inspect
+        params = inspect.signature(fn).parameters
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            return args
+        allowed = set(params.keys())
+        return {k: v for k, v in args.items() if k in allowed}
+    except (TypeError, ValueError):
+        return args
+
+
 class McpError(RuntimeError):
     """MCP 调用失败（非业务错误，如连接超时、工具未注册）。"""
 
@@ -71,14 +87,21 @@ class CarMcpClient:
     def call(self, tool_name: str, args: dict, timeout: float = 30) -> Any:
         """同步调用 booking_mcp_server 工具 → dict / list（业务侧 json.loads 解析）。"""
         fn = self._resolve_tool(tool_name)
-        # 注入 emailAddress（booking_mcp_server 的工具都接受此 kwarg）
+        # 注入 emailAddress + mobile（2026-06-25 新版上游：邮箱/手机号至少一个即可鉴权；
+        # booking_mcp_server 的工具签名都接受这两个 kwarg）。
         try:
             from ocl.tool_guard import get_current_caller
             caller = get_current_caller()
             if caller.email and "emailAddress" not in args:
                 args = {**args, "emailAddress": caller.email}
+            if caller.mobile and "mobile" not in args:
+                args = {**args, "mobile": caller.mobile}
         except Exception:
             pass
+        # 过滤掉目标函数签名不接受的 kwarg（上游签名变更时容错：如旧 reservationId /
+        # fetch_available_vehicles 的 startTime/endTime 已被新版移除）。booking_mcp_server
+        # 的工具都是显式具名参数（无 **kwargs），按签名过滤是安全的。
+        args = _filter_to_signature(fn, args)
         try:
             return fn(**args)
         except Exception as e:

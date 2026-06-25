@@ -246,6 +246,25 @@ def build_fail_card(error: str, *, context: str = "") -> dict:
     ])
 
 
+# ── mutation 二次确认卡（Tier-2 cancel 等危险操作） ──────────────────────────
+
+def build_cancel_confirm_card(vehicle_no: str) -> dict:
+    """取消预约二次确认卡：[确认取消] / [放弃]。
+
+    确认按钮 value 携带要执行的操作与车辆编号（无状态，回调端重建参数执行）。
+    """
+    return _card_base([
+        _div(f"⚠️ **确认取消预约？**\n\n"
+             f"🚗 车辆编号：**{vehicle_no}**\n\n"
+             f"取消后该预约将作废，无法恢复。请确认："),
+        _button_row([
+            _button("✅ 确认取消", {"action": "confirm_mutation",
+                                "mutation": "cancel", "vehicle_no": vehicle_no}, "danger"),
+            _button("↩️ 放弃", {"action": "cancel_flow"}, "default"),
+        ]),
+    ])
+
+
 # ── 3. 预约/审批记录卡片（fast-path 用） ────────────────────────────────────
 
 def build_records_card(records: list, *, title: str) -> dict:

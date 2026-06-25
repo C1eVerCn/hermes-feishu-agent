@@ -75,6 +75,10 @@ def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | No
                 open_id, chat_id, vehicle_no, vehicle_type, platform, license_plate,
                 email)
 
+        # ── 确认危险操作（cancel 二次确认） ─────────────────────────
+        if action == "confirm_mutation":
+            return _handle_confirm_mutation(open_id, value)
+
         # ── 确认预约（[确认] 按钮） ─────────────────────────────────
         if action == "confirm_booking":
             return _handle_confirm_booking(open_id, chat_id, value, email)
@@ -200,6 +204,25 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     new_state, response = car_booking_fsm.advance(open_id, text)
     log.info("fsm_button user=%s action=%s new_state=%s", open_id, action, new_state)
     return _render_fsm_response(response)
+
+
+# ── confirm_mutation（cancel 二次确认回调） ─────────────────────────────────
+
+def _handle_confirm_mutation(open_id: str, value: dict) -> tuple[str, dict | None]:
+    """用户在二次确认卡点 [确认取消] → 执行 mutation。无 LLM，确定性。"""
+    from bot import fast_path
+    from bot.identity_admin import get_admin
+    from bot.car_booking_fsm import _card_wrap
+    mutation = value.get("mutation", "")
+    vehicle_no = value.get("vehicle_no", "")
+    role = get_admin().get_role(open_id)
+    result = fast_path.run_mutation(mutation, {"vehicle_no": vehicle_no}, open_id, role)
+    if result is None:
+        text = "❌ 无法执行该操作（缺少车辆编号或权限不足）。"
+    else:
+        text = result.get("text") or "操作完成。"
+    card = _card_wrap([{"tag": "div", "text": {"tag": "lark_md", "content": text}}])
+    return text[:100], card
 
 
 # ── select_vehicle ─────────────────────────────────────────────────────────

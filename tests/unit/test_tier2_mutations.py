@@ -13,26 +13,28 @@ from ocl.tool_guard import set_current_caller, CallerIdentity
 
 # ── fast_path.run_mutation：入参构造 + 守卫 ───────────────────────────────
 def test_build_mutation_args_cancel():
-    assert fast_path._build_mutation_args("cancel", {"vehicle_no": "PNV332"}) == {"vehicleNo": "PNV332"}
-    assert fast_path._build_mutation_args("cancel", {"reservation_id": "R1"}) == {"reservationId": "R1"}
-    assert fast_path._build_mutation_args("cancel", {}) is None  # 缺识别符
+    assert fast_path.build_mutation_args("cancel", {"vehicle_no": "PNV332"}) == {"vehicleNo": "PNV332"}
+    # 新版上游去掉 reservationId → 仅 reservation_id 不够，需 vehicle_no
+    assert fast_path.build_mutation_args("cancel", {"reservation_id": "R1"}) is None
+    assert fast_path.build_mutation_args("cancel", {}) is None  # 缺识别符
 
 
 def test_build_mutation_args_return():
-    assert fast_path._build_mutation_args("return", {"vehicle_no": "PNV332"}) == {"vehicleNo": "PNV332"}
-    assert fast_path._build_mutation_args("return", {}) is None
+    assert fast_path.build_mutation_args("return", {"vehicle_no": "PNV332"}) == {"vehicleNo": "PNV332"}
+    assert fast_path.build_mutation_args("return", {}) is None
 
 
 def test_build_mutation_args_approve():
-    a = fast_path._build_mutation_args("approve", {"vehicle_no": "PNV1", "approved": True})
+    a = fast_path.build_mutation_args("approve", {"vehicle_no": "PNV1", "approved": True})
     assert a["vehicleNo"] == "PNV1" and a["approved"] is True
+    assert "reservationId" not in a  # 新版上游去掉
     # approved=False 必须保留（不能被空值过滤掉）
-    a2 = fast_path._build_mutation_args("approve", {"vehicle_no": "PNV1", "approved": False})
+    a2 = fast_path.build_mutation_args("approve", {"vehicle_no": "PNV1", "approved": False})
     assert a2["approved"] is False
     # 缺 approved → None
-    assert fast_path._build_mutation_args("approve", {"vehicle_no": "PNV1"}) is None
-    # 缺识别符 → None
-    assert fast_path._build_mutation_args("approve", {"approved": True}) is None
+    assert fast_path.build_mutation_args("approve", {"vehicle_no": "PNV1"}) is None
+    # 缺 vehicle_no → None
+    assert fast_path.build_mutation_args("approve", {"approved": True}) is None
 
 
 def test_run_mutation_missing_identifier_returns_none(monkeypatch):
@@ -123,24 +125,41 @@ def setup(monkeypatch):
     car_state.clear("ou_mh")
 
 
-def test_handler_cancel_dispatch(setup, monkeypatch):
+def test_handler_cancel_shows_confirm_card(setup, monkeypatch):
+    """取消 → 二次确认卡（不直接执行）。"""
     car_state.clear("ou_mh")
     monkeypatch.setattr(intent_router, "classify",
                         lambda t: RouteResult(intent="cancel",
                                               slots={"vehicle_no": "PNV332"}, confidence=0.9))
-    monkeypatch.setattr(fast_path, "run_mutation",
-                        lambda i, s, u, r: {"text": "✅ 已取消预约 PNV332。", "card": None, "blocked": False})
     handler._handle(_event("把我那个PNV332的预约取消掉", "m1"))
-    assert setup.texts and "已取消" in setup.texts[-1]
+    assert setup.cards, "应发二次确认卡"
+    blob = json.dumps(setup.cards[-1], ensure_ascii=False)
+    assert "确认取消" in blob and "PNV332" in blob
 
 
 def test_handler_cancel_missing_id_falls_to_agent(setup, monkeypatch):
     car_state.clear("ou_mh")
     monkeypatch.setattr(intent_router, "classify",
                         lambda t: RouteResult(intent="cancel", slots={}, confidence=0.9))
-    monkeypatch.setattr(fast_path, "run_mutation", lambda i, s, u, r: None)  # 缺识别符
     called = {"agent": False}
     monkeypatch.setattr(handler, "_run_agent",
                         lambda *a, **k: called.__setitem__("agent", True))
     handler._handle(_event("帮我取消一个预约", "m2"))
     assert called["agent"] is True
+
+
+def test_confirm_mutation_callback_executes(monkeypatch):
+    """点 [确认取消] → card_action_handler 执行 cancel。"""
+    from bot import card_action_handler as cah
+    from car_tools import handlers as ch
+    admin = identity_admin.get_admin()
+    admin.auto_register("ou_cm", email="cm@x.com", name="cm")
+    admin.set_role("ou_cm", 1, operator="test")
+    monkeypatch.setattr(ch, "cancel_vehicle_reservation",
+                        lambda args: json.dumps({"cancelled": True, "vehicle_no": "PNV332"}))
+    monkeypatch.setattr("ocl.identity.email_of", lambda oid: "cm@x.com")
+    monkeypatch.setattr("ocl.identity.mobile_of", lambda oid: "")
+    toast, card = cah.handle("ou_cm", {"action": "confirm_mutation",
+                                       "mutation": "cancel", "vehicle_no": "PNV332"})
+    blob = (toast or "") + json.dumps(card, ensure_ascii=False)
+    assert "已取消" in blob and "PNV332" in blob

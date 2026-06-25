@@ -30,22 +30,22 @@ log = logging.getLogger(__name__)
 # ── 身份注入 ──────────────────────────────────────────────────────────────
 
 def _inject_caller(args: dict) -> dict:
-    """从 contextvars 读 CallerIdentity，注入 emailAddress（camelCase 给上游 MCP）。
+    """从 contextvars 读 CallerIdentity，注入 emailAddress + mobile（camelCase 给上游 MCP）。
 
-    2026-06-18 fix：移除 openId 注入 —— dmz-fmp-mcp 9 个 @Tool 函数签名都不接受
-    openId（只认 emailAddress / 业务参数），注入 openId 会导致
-    `TypeError: got an unexpected keyword argument 'openId'`，所有走 _call_mcp
-    路径的 fast-path / handler 工具调用都失败。
-    openid 仍可通过 CallerIdentity 在 OCL L1/L2 鉴权层读取，不必传给上游 fmp。
+    2026-06-18 fix：移除 openId 注入 —— dmz-fmp-mcp 的 @Tool 函数签名不接受 openId，
+    注入会 `TypeError: unexpected keyword argument 'openId'`。openid 仍在 OCL L1/L2
+    鉴权层用，不传上游。
 
-    2026-06-25：mobile 同理**不**注入上游 —— 上游每个 @Tool 都以 emailAddress 为识别符、
-    签名里没有 mobile 参数（注入会 TypeError）。手机号是本系统的**第二识别符**（存
-    identity_map、随 CallerIdentity 透传、可按手机号查人），上游接入 mobile 参数前不下传。
+    2026-06-25：新版上游（dmz-fmp-mcp-260409）每个 @Tool 都接受 emailAddress + mobile，
+    且"邮箱/手机号至少一个"即可鉴权。故 mobile 现在也注入（飞书已开通
+    contact:user.phone:readonly，mobile 由 CallerIdentity 携带）。
     """
     caller = get_current_caller()
     injected: dict[str, Any] = {}
     if caller.email:
         injected["emailAddress"] = caller.email
+    if caller.mobile:
+        injected["mobile"] = caller.mobile
     return {**injected, **args}
 
 
@@ -426,11 +426,9 @@ def get_common_dictionary(args: dict, **_) -> str:
         "typeCode": args.get("typeCode") or args.get("type_code"),
     }
     payload = {k: v for k, v in payload.items() if v is not None and v != ""}
-    try:
-        raw = _call_mcp("get_common_dictionary", payload)
-    except mcp_client.McpToolNotFound:
-        # MCP server 当前未暴露该工具 → 返回内置字典
-        type_code = payload.get("typeCode", "")
+    type_code = payload.get("typeCode", "")
+
+    def _builtin_or_error() -> str:
         items = _BUILTIN_DICTIONARY.get(type_code, [])
         if items:
             return json.dumps({"items": items}, ensure_ascii=False)
@@ -438,4 +436,18 @@ def get_common_dictionary(args: dict, **_) -> str:
             "error": f"字典类型 {type_code!r} 未在内置 fallback 中定义，"
                      f"已知类型：{sorted(_BUILTIN_DICTIONARY.keys())}",
         }, ensure_ascii=False)
+
+    try:
+        raw = _call_mcp("get_common_dictionary", payload)
+    except mcp_client.McpToolNotFound:
+        # Python 侧 dispatch 没有该工具 → 内置字典
+        return _builtin_or_error()
+    # 2026-06-25：新版上游已注释掉 get_common_dictionary（@Tool 不再注册）。
+    # 上游缺失会回 {"code":500,...} 而非 McpToolNotFound，这里也降级到内置字典。
+    try:
+        obj = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, ValueError):
+        obj = None
+    if isinstance(obj, dict) and (obj.get("error") or obj.get("code") not in (None, 200, 0)):
+        return _builtin_or_error()
     return raw

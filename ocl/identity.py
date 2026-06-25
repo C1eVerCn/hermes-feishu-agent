@@ -8,6 +8,7 @@
 """
 import json
 import os
+import re
 import threading
 import logging
 
@@ -24,6 +25,8 @@ _lock = threading.Lock()
 # ── in-memory caches (open_id → str) ─────────────────────────────────────
 _email_cache: dict[str, str] = {}
 _name_cache: dict[str, str] = {}
+# 飞书 API 解析出的手机号缓存（开通 contact:user.phone:readonly 后随 email 一并解析）
+_mobile_api_cache: dict[str, str] = {}
 # 负向缓存：尝试解析过但没有结果的 open_id
 _miss_cache: set[str] = set()
 # 反向索引：email → open_id（从 identity_map.json v2 schema 扫出来）
@@ -115,8 +118,20 @@ def _invalidate_role_overrides() -> None:
     _role_overrides_mtime = None
 
 
-def _resolve_open_id(open_id: str) -> tuple[str, str]:
-    """Call Feishu Contact API. Returns (email, name) or ('', '')."""
+def _normalize_mobile(m: str) -> str:
+    """飞书 mobile 可能带 +86 / 区号 → 归一化为 11 位手机号（上游 ^1[3-9]\\d{9}$）。"""
+    digits = re.sub(r"\D", "", m or "")
+    if len(digits) == 13 and digits.startswith("86"):
+        digits = digits[2:]
+    return digits
+
+
+def _resolve_open_id(open_id: str) -> tuple[str, str, str]:
+    """Call Feishu Contact API. Returns (email, name, mobile) or ('', '', '').
+
+    手机号需 contact:user.phone:readonly 权限（2026-06 已开通）。不记录 email/mobile
+    原文到日志（PII）——只记 open_id + 是否解析到。
+    """
     try:
         client = _get_client()
         req = (
@@ -128,14 +143,16 @@ def _resolve_open_id(open_id: str) -> tuple[str, str]:
         resp = client.contact.v3.user.get(req)
         if resp.success() and resp.data and resp.data.user:
             u = resp.data.user
-            email = getattr(u, "email", "") or ""
+            email = getattr(u, "email", "") or getattr(u, "enterprise_email", "") or ""
             name = getattr(u, "name", "") or ""
-            log.info("feishu_user_resolved open_id=%s email=%s name=%s", open_id, email, name)
-            return email, name
+            mobile = _normalize_mobile(getattr(u, "mobile", "") or "")
+            log.info("feishu_user_resolved open_id=%s has_email=%s has_mobile=%s",
+                     open_id, bool(email), bool(mobile))
+            return email, name, mobile
         log.warning("feishu_user_resolve_failed open_id=%s code=%s msg=%s", open_id, resp.code, resp.msg)
     except Exception:
         log.exception("feishu_user_resolve_error open_id=%s", open_id)
-    return "", ""
+    return "", "", ""
 
 
 # ── public API ──────────────────────────────────────────────────────────────
@@ -149,8 +166,12 @@ def email_of(open_id: str) -> str:
         if open_id in _miss_cache:
             return ""
         # unlock while calling external API
-    email, name = _resolve_open_id(open_id)
+    res = _resolve_open_id(open_id)
+    email, name = res[0], res[1]
+    mobile = res[2] if len(res) > 2 else ""  # 容忍旧 2-tuple（测试 mock）
     with _lock:
+        if mobile:
+            _mobile_api_cache[open_id] = mobile  # 即使 email 为空也缓存 mobile
         if email:
             _email_cache[open_id] = email
             _name_cache[open_id] = name
@@ -162,15 +183,23 @@ def email_of(open_id: str) -> str:
 def mobile_of(open_id: str) -> str:
     """open_id → 手机号（第二识别符）。
 
-    来源优先级：identity_map.json（管理员/同步写入的 ``mobile`` 字段）。飞书 contact v3
-    默认无 mobile 权限，故不从飞书 API 解析（拿到权限后可在此补充，与 email_of 同构）。
-    无配置返回 ""。
+    优先级：identity_map.json（管理员手动设置/覆盖）> 飞书 Contact API（已开通
+    contact:user.phone:readonly，随 email 一并解析并缓存）> ""。
     """
     if not open_id:
         return ""
-    _load_role_overrides()  # 确保 _mobile_cache 已填充（mtime 变化时重载）
+    _load_role_overrides()  # 填充 _mobile_cache（identity_map override）
     with _lock:
-        return _mobile_cache.get(open_id, "")
+        if _mobile_cache.get(open_id):      # 管理员手动设置优先
+            return _mobile_cache[open_id]
+        if open_id in _mobile_api_cache:
+            return _mobile_api_cache[open_id]
+        already_resolved = open_id in _email_cache or open_id in _miss_cache
+    if already_resolved:
+        return ""  # 已解析过且无 mobile
+    email_of(open_id)  # 触发一次飞书解析（会填 _mobile_api_cache）
+    with _lock:
+        return _mobile_api_cache.get(open_id, "")
 
 
 def open_id_of_mobile(mobile: str) -> str:

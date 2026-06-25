@@ -14,9 +14,10 @@ def _fresh(tmp_path, monkeypatch):
     identity._invalidate_role_overrides()
     identity._email_cache.clear()
     identity._name_cache.clear()
+    identity._mobile_api_cache.clear()
     identity._miss_cache.clear()
     # prevent real API calls by default
-    monkeypatch.setattr(identity, "_resolve_open_id", lambda oid: ("", ""))
+    monkeypatch.setattr(identity, "_resolve_open_id", lambda oid: ("", "", ""))
     yield
 
 

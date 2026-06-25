@@ -231,12 +231,29 @@ def _route_with_llm(chat_id: str, user_id: str, role: int, text: str) -> bool:
         sender.send_text_as_card(chat_id, intent_filter.REDIRECT_MESSAGE)
         return True
 
-    if decision.intent in ("cancel", "return", "approve"):
-        result = fast_path.run_mutation(decision.intent, decision.slots, user_id, role)
+    if decision.intent == "cancel":
+        # 取消是危险操作 → 二次确认卡（确认后由 card_action_handler 执行）
+        args = fast_path.build_mutation_args("cancel", decision.slots)
+        if args is None:
+            return False  # 缺车辆编号 → agent 追问
+        from ocl.permission import TOOL_MIN_ROLE
+        if TOOL_MIN_ROLE.get("cancel_vehicle_reservation", 99) > role:
+            return False
+        from car_tools import card_builder as _cb
+        sender.send_card(chat_id, _cb.build_cancel_confirm_card(decision.slots.get("vehicle_no", "")))
+        return True
+
+    if decision.intent == "approve":
+        result = fast_path.run_mutation("approve", decision.slots, user_id, role)
         if result is not None:
             _send_result(chat_id, result)
             return True
-        return False  # 缺识别符/权限不足 → agent 追问
+        return False  # 缺识别符/权限不足 → agent
+
+    if decision.intent == "return":
+        # 还车需 5 个必填字段（还车地点/钥匙位置/变更模块/车辆状态/状态描述），
+        # 一键确认不足以收集 → 交完整 agent 对话式收集（其有 return_vehicle 工具）。
+        return False
 
     # unknown → agent（自由推理）
     return False
