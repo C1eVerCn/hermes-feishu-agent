@@ -46,7 +46,11 @@ TIMEOUT: float = float(os.getenv("CAR_MCP_TIMEOUT", "80"))
 # 2026-06-18 优化：缩短 SSE connect / read 超时，让失败时快速降级
 # （之前 connect 失败时实测 ~4s 才返回 TaskGroup 错误）。
 SSE_CONNECT_TIMEOUT: float = float(os.getenv("CAR_MCP_CONNECT_TIMEOUT", "3"))
-SSE_READ_TIMEOUT: float = float(os.getenv("CAR_MCP_READ_TIMEOUT", "30"))
+SSE_READ_TIMEOUT: float = float(os.getenv("CAR_MCP_READ_TIMEOUT", "15"))
+# 持久 SSE session 空闲超过该秒数 → 下次调用前主动重建（避免撞 30s 读超时）。
+IDLE_REBUILD_SECONDS: float = float(os.getenv("CAR_MCP_IDLE_REBUILD", "90"))
+# 最近一次成功调用的 monotonic 时刻（空闲重建判定）
+_last_call_monotonic: float = 0.0
 
 
 # ── MCP 客户端（同步包装） ─────────────────────────────────────────────────
@@ -127,7 +131,19 @@ async def _do_call(tool_name: str, arguments: dict) -> dict:
 
     2026-06-24：加 1 次自动重试（应对 Spring AI server 间歇性 TaskGroup
     错误 —— 实测首次 call 间歇性 ~3-5s 失败后，下次 call 才能成功）。
+    2026-06-25：空闲过久主动重建 session —— 持久 SSE 长连接空闲十几分钟后会被
+    上游/网络僵死，下次真实调用撞 30s 读超时（用户实测"查车没反应/很慢"）。
+    用 _last_call_monotonic 记最近一次成功调用，空闲超 IDLE_REBUILD_SECONDS 就先
+    重开（~3s）而不是傻等 30s 超时。
     """
+    global _last_call_monotonic
+    import time as _time
+    now = _time.monotonic()
+    if (not _session_holder.empty() and _last_call_monotonic
+            and (now - _last_call_monotonic) > IDLE_REBUILD_SECONDS):
+        log.info("fmp_mcp_idle_rebuild idle=%.0fs (主动重建空闲 session)",
+                 now - _last_call_monotonic)
+        await _close_session()
     last_exc = None
     for attempt in range(2):  # 最多试 2 次
         # 确保 session 存在
@@ -143,6 +159,7 @@ async def _do_call(tool_name: str, arguments: dict) -> dict:
 
         try:
             result = await session.call_tool(tool_name, arguments)
+            _last_call_monotonic = _time.monotonic()  # 记成功时刻（空闲重建判定用）
             return _parse_tool_result(result, tool_name, arguments)
         except Exception as e:
             last_exc = e
