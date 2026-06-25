@@ -514,7 +514,20 @@ def _resolve_slot_from_text(text: str, slots: list[dict]) -> dict | None:
 
 
 # 车辆编号格式：字母 2-5 个 + 数字 3-6 个（spec §3.3 D-1）
-_VEHICLE_NO_RE = re.compile(r"^[A-Z]{2,5}\d{3,6}$")
+# 2026-06-24 扩展：实际车辆编号格式多样（苏EAM0769 / AATI25SNV630 /
+# TTVX25SPV009 / I23SVV021），不再是 SNV018 这种纯字母+数字。
+# 新规则：1) 5-20 字符；2) 必须以字母或汉字开头；3) 包含至少 1 个数字；
+# 4) 全是字母/数字/汉字（无标点空格）。
+_VEHICLE_NO_RE = re.compile(r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$")
+
+
+def _looks_like_vehicle_id(s: str) -> bool:
+    """2026-06-24：宽松校验。regex + 必须含至少 1 个数字（否则纯汉字/纯字母也算）。"""
+    if not s or len(s) < 5 or len(s) > 20:
+        return False
+    if not _VEHICLE_NO_RE.match(s):
+        return False
+    return any(c.isdigit() for c in s)
 
 
 # LLM 抽取的 stub：MVP 简化版。后续 Task 6 替换为真 LLM 调用。
@@ -602,9 +615,29 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     # 这样用户点"不知道/知道"按钮回调时仍在 START 状态，marker 能被正确分发。
     if current_state == STATE_START:
         # 优先识别"报编号"快捷路径（用户在 START 直接报编号）
-        if text and _VEHICLE_NO_RE.match(text.strip().upper()):
-            car_state.save(user_id, vehicle_no=text.strip().upper())
+        # 2026-06-24：先尝试整段匹配（短文本）；不通过则从 token 中剥离中文前缀找嵌入编号
+        text_stripped = (text or "").strip()
+        if (text_stripped and _looks_like_vehicle_id(text_stripped.upper())
+                and not any('一' <= c <= '鿿' for c in text_stripped[1:])):
+            # 整段是纯 vehicle_id（不含中文），直接用
+            car_state.save(user_id, vehicle_no=text_stripped.upper())
             return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
+        # 嵌入情况（"我想约一下TTVX25SPV009"）：按空格/标点切 token，
+        # 找首个含数字的 token，然后从左 trim 连续汉字直到剩 vehicle_id
+        for token in re.split(r"[\s,，.。!！?？;；]+", text or ""):
+            if not token:
+                continue
+            upper = token.upper()
+            stripped = upper
+            while stripped and '一' <= stripped[0] <= '鿿':
+                stripped = stripped[1:]  # 剥汉字前缀
+            if stripped and _looks_like_vehicle_id(stripped):
+                car_state.save(user_id, vehicle_no=stripped)
+                return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
+            # 如果 token 整体就是 vehicle_id（剥不到汉字后也没变化）也接受
+            if _looks_like_vehicle_id(upper):
+                car_state.save(user_id, vehicle_no=upper)
+                return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
         # 收到"知道"按钮回调 → DIRECT_BY_ID
         if text == _FSM_KNOWN_YES_MARKER:
             return STATE_DIRECT_BY_ID, {
@@ -896,10 +929,10 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     # DIRECT_BY_ID：用户直接报编号（spec §3.3）
     if current_state == STATE_DIRECT_BY_ID:
         vehicle_no = text.strip().upper()
-        if not _VEHICLE_NO_RE.match(vehicle_no):
+        if not _looks_like_vehicle_id(vehicle_no):
             return STATE_DIRECT_BY_ID, {
                 "text": (f"❌ 编号格式不符「{vehicle_no}」\n\n"
-                         f"💡 正确格式：字母+数字（如 SNV018 / PNV000）\n"
+                         f"💡 正确格式：字母/汉字开头 + 含数字 + 5-15 字符（如 SNV018 / 苏EAM0769）\n"
                          f"🚪 说「算了/取消」可返回车型选择"),
             }
         car_state.save(user_id, vehicle_no=vehicle_no)

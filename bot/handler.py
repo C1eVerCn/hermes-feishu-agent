@@ -318,8 +318,17 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
                       "想约车", "想约一辆车", "要约车", "约个车",
                       "想预约车", "想预约一辆车")
     norm = text.strip()
-    # "报编号"快捷路径：字母+数字 5-9 字符（spec §3.3 START 路径）
-    is_vehicle_id = bool(re.match(r"^[A-Za-z]{2,5}\d{3,6}$", norm))
+    # "报编号"快捷路径：宽松校验（苏EAM0769 / AATI25SNV630 / TTVX25SPV009 格式）
+    is_vehicle_id = bool(re.match(
+        r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", norm))
+    # 2026-06-24：嵌入文本中的车辆编号也算 booking intent
+    # 用 word boundary 切分（避免把整句当编号），再用 _looks_like_vehicle_id 验证
+    _has_embedded_vehicle_id = False
+    for token in re.split(r"[\s,，.。!！?？;；]+", norm):
+        if re.match(r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", token):
+            if any(c.isdigit() for c in token):
+                _has_embedded_vehicle_id = True
+                break
     # 2026-06-24 强化意图识别：用「intent 动词 + 0-12 字符 + 车辆词」regex
     # 覆盖口语化变体（"我想要约一辆车"/"请问能帮我预约一下车辆吗"等）。
     # 否定检测：前 8 字符内出现 不/没/别/无需/算了/取消/不要了 即视为非意图。
@@ -331,6 +340,7 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         norm in BOOKING_INTENT
         or norm.startswith(("我要约", "帮我约"))  # 兼容老的快捷路径
         or (_has_intent and not _has_negation)
+        or _has_embedded_vehicle_id  # 文本里含车辆编号 → 用户在约这辆车
         or _is_type_keyword(norm)
         or is_vehicle_id
     )
