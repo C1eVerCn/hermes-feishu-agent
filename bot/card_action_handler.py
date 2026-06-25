@@ -194,6 +194,7 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
             return (f"查询预约失败：{e}", None)
 
     # 调 FSM 主入口
+    log.info("fsm_button user=%s action=%s text=%r", open_id, action, text[:50] if text else None)
     new_state, response = car_booking_fsm.advance(open_id, text)
     log.info("fsm_button user=%s action=%s new_state=%s", open_id, action, new_state)
     return _render_fsm_response(response)

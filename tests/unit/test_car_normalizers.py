@@ -192,18 +192,23 @@ def test_normalize_reservation_result_injects_applicant():
     assert out.applicant_email == "x@y.com"
 
 
-def test_normalize_reservation_result_rejects_missing_vehicle_no():
-    """2026-06-24 review fix：fmp 返 success=True 但 vehicle_no 缺失 → 抛错。
-    2026-06-24 hotfix：放宽到只校验 vehicle_no（其他字段允许 None，
-    fmp sparse response {code:200, data:null} 兼容）。
+def test_normalize_reservation_result_accepts_completely_empty_success():
+    """2026-06-25 fix：完全去掉字段校验。
+
+    根因：fmp 实际返 `{success: True, applicant_mobile: None}` sparse response，
+    任何字段校验都误判。SUCCESS 卡从 car_state 读数据，不依赖 fmp 响应字段。
+    信任 fmp 的 success=True。
     """
-    with pytest.raises(normalizers.NormalizeError) as exc_info:
-        normalizers.normalize_reservation_result({
-            "code": 200,
-            "success": True,
-            # vehicleNo 缺失
-        })
-    assert "vehicle_no" in str(exc_info.value)
+    out = normalizers.normalize_reservation_result({
+        "code": 200,
+        "success": True,
+        # 没有任何业务字段
+    })
+    assert out.success is True
+    # 缺字段时 normalizer 填空串
+    assert out.vehicle_no == ""
+    assert out.task_name == ""
+    assert out.location == ""
 
 
 def test_normalize_reservation_result_accepts_sparse_success():

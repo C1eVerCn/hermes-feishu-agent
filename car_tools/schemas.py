@@ -87,13 +87,10 @@ class ReservationResult(_Strict):
 
     @model_validator(mode="after")
     def _check_required_on_success(self):
-        # 只校验 vehicle_no（fmp 实际行为：code=200 但 data=null 稀疏成功，
-        # 其他字段允许 None —— 用户在 car_state 里仍有完整数据用于显示）
-        if not self.success:
-            return self
-        if not (self.vehicle_no or "").strip():
-            raise ValueError(
-                "single_vehicle_reservation 返 success=True 但缺关键字段 vehicle_no")
+        # 2026-06-25 fix：完全去掉字段校验。
+        # 根因：fmp 返的 success=True 实际是 sparse response（仅 {success, applicant_mobile: None}），
+        # 任何字段校验都会误判。SUCCESS 卡从 car_state 读数据，不依赖 fmp 响应字段。
+        # 信任 fmp 的 success=True，让 booking 正常完成。
         return self
 
 

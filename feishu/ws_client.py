@@ -70,13 +70,22 @@ def _extract_card_action(data: P2CardActionTrigger):
     """
     op = data.event.operator
     open_id = getattr(op, "open_id", "") or ""
-    value = getattr(data.event.action, "value", None) or {}
     action = data.event.action
+    # 2026-06-25 debug：form submit 排查 — log 完整 action 数据
+    if getattr(action, "tag", None) in ("form", "select_static"):
+        import logging
+        _dbg = logging.getLogger("feishu.ws_client")
+        _dbg.info(
+            "form_callback_FULL open_id=%s tag=%s action.value=%r action.name=%r "
+            "action.form_value=%r action.input_value=%r action.option=%r action.options=%r",
+            open_id, getattr(action, "tag", None),
+            getattr(action, "value", None), getattr(action, "name", None),
+            getattr(action, "form_value", None), getattr(action, "input_value", None),
+            getattr(action, "option", None), getattr(action, "options", None),
+        )
+    value = getattr(action, "value", None) or {}
     action_tag = getattr(action, "tag", None)
     # 2026-06-25：Card 2.0 form submit button 的 name 在 action.name 里
-    # （不是 value 里）。lark 调用时如果 button 在 form 内，
-    # action.name = button.name（我们设的 fsm_input_task_form 等）
-    # action.value 可能为 {} 或 None，需要把 name 注入到 value['action']
     action_name = getattr(action, "name", None)
     if action_name and isinstance(value, dict) and not value.get("action"):
         value = {**value, "action": action_name}
