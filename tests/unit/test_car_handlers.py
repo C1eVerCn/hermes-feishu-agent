@@ -85,6 +85,24 @@ def test_no_mobile_field_when_none(fake_mcp):
     assert "mobile" not in args
 
 
+def test_prefers_email_over_mobile(fake_mcp):
+    """有邮箱时只发 emailAddress、不发 mobile（上游同时收到会按 mobile 查 → 误判非平台用户）。"""
+    set_current_caller(CallerIdentity(openid="ou_alice", email="a@x.com", mobile="13800138000"))
+    handlers.fetch_available_vehicles({"vehicle_type": "DM2"})
+    _, args = fake_mcp.calls[0]
+    assert args.get("emailAddress") == "a@x.com"
+    assert "mobile" not in args  # 关键：有邮箱时绝不带 mobile
+
+
+def test_mobile_fallback_when_no_email(fake_mcp):
+    """无邮箱、有手机号 → 用手机号兜底（覆盖只登记了手机号的用户）。"""
+    set_current_caller(CallerIdentity(openid="ou_alice", email="", mobile="13800138000"))
+    handlers.fetch_available_vehicles({"vehicle_type": "DM2"})
+    _, args = fake_mcp.calls[0]
+    assert "emailAddress" not in args
+    assert args.get("mobile") == "13800138000"
+
+
 # ── fetch_available_vehicles ──────────────────────────────────────────────
 
 def test_fetch_available_vehicles_happy(fake_mcp, auth_caller):

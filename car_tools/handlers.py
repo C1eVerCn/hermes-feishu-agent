@@ -36,15 +36,17 @@ def _inject_caller(args: dict) -> dict:
     注入会 `TypeError: unexpected keyword argument 'openId'`。openid 仍在 OCL L1/L2
     鉴权层用，不传上游。
 
-    2026-06-25：新版上游（dmz-fmp-mcp-260409）每个 @Tool 都接受 emailAddress + mobile，
-    且"邮箱/手机号至少一个"即可鉴权。故 mobile 现在也注入（飞书已开通
-    contact:user.phone:readonly，mobile 由 CallerIdentity 携带）。
+    2026-06-25：新版上游（dmz-fmp-mcp-260409）每个 @Tool 都接受 emailAddress + mobile。
+    **实测上游在同时收到 email+mobile 时按 mobile 查**，而多数用户在 fmp 后端按邮箱注册
+    （手机号未必登记）→ 同时发会把"邮箱已注册"的用户顶成"非平台用户"（实测 chenyihang
+    邮箱查到 8 辆车，加手机号后变 0 辆"非平台用户"）。故策略：**优先邮箱，仅当无邮箱时
+    才用手机号**（手机号作为无邮箱用户的兜底识别符）。
     """
     caller = get_current_caller()
     injected: dict[str, Any] = {}
     if caller.email:
         injected["emailAddress"] = caller.email
-    if caller.mobile:
+    elif caller.mobile:
         injected["mobile"] = caller.mobile
     return {**injected, **args}
 
