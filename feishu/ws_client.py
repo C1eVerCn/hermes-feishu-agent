@@ -73,6 +73,13 @@ def _extract_card_action(data: P2CardActionTrigger):
     value = getattr(data.event.action, "value", None) or {}
     action = data.event.action
     action_tag = getattr(action, "tag", None)
+    # 2026-06-25：Card 2.0 form submit button 的 name 在 action.name 里
+    # （不是 value 里）。lark 调用时如果 button 在 form 内，
+    # action.name = button.name（我们设的 fsm_input_task_form 等）
+    # action.value 可能为 {} 或 None，需要把 name 注入到 value['action']
+    action_name = getattr(action, "name", None)
+    if action_name and isinstance(value, dict) and not value.get("action"):
+        value = {**value, "action": action_name}
     if isinstance(value, dict) and not value.get("value"):
         # 2026-06-18 select_static + form 兼容：lark-oapi CallBackAction 字段
         # (lark_oapi/event/callback/model/p2_card_action_trigger.py:38-66):

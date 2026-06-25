@@ -194,33 +194,33 @@ def _input_form_card(title: str, placeholder: str, button_text: str,
                      max_length: int = 100) -> dict:
     """Card 2.0 form + input + button 卡片（用户点「其它」时显示）。
 
-    飞书 Card 2.0 的 form 元素：内含 input（单行文本输入框）和 button（提交）。
-    用户在 input 里输入文本后点 button，飞书回调事件带：
+    飞书 Card 2.0 form 元素正确结构（参考 reservation_agent-test-agent_multigraph
+    的 build_direct_booking_form）：
+    - form 必须有 name 属性
+    - button 必须有 action_type="form_submit" 和 name（不是 value.action）
+    - input 是子元素之一
+
+    提交时飞书回调带：
       - action.tag = "form"
-      - action.form_value = {input_name: 用户输入的文本}（form 聚合提交）
-      - action.input_value = 用户输入的文本（input 元素单独提交）
-      - action.value = button 的 value 字段（{action: "fsm_input_xxx_form"}）
-
-    feishu/ws_client._extract_card_action 把 form_value[input_name] / input_value
-    扁平化到 value['value']，让下游 card_action_handler._handle_fsm_button
-    当作普通按钮 value 处理。
-
-    2026-06-25 fix：Card 2.0 form input 元素的 value 字段类型必须是 string（之前
-    误用 {"tag": "plain_text", "content": ""} 对象格式，可能被 lark 拒绝）。
-    简化结构只保留必要字段（name, placeholder, max_length, button value）。
+      - action.form_value = {input_name: 用户输入的文本}
+      - action.input_value = 用户输入的文本
+      - action.value.action = 我们设的 action 字符串（卡 button 的 name 字段映射）
     """
+    # 2026-06-25 修复：lark code: 200673 — form 缺 name 字段、button 缺
+    # action_type="form_submit" + name 字段。Lark 拒绝不完整 form 结构。
+    form_name = "fsm_input_form"
+    button_name = action  # 按钮 name 在 form 提交事件里通过 value.action 拿到
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md", "content": title}},
-        {"tag": "form",
-         "elements": [
-             {"tag": "input",
-              "name": input_name,
-              "placeholder": {"tag": "plain_text", "content": placeholder},
-              "max_length": max_length},
-             {"tag": "button", "type": "primary",
-              "text": {"tag": "plain_text", "content": button_text},
-              "value": {"action": action}},
-         ]},
+        {"tag": "form", "name": form_name, "elements": [
+            {"tag": "input",
+             "name": input_name,
+             "placeholder": {"tag": "plain_text", "content": placeholder}},
+            {"tag": "button", "type": "primary",
+             "text": {"tag": "plain_text", "content": button_text},
+             "action_type": "form_submit",
+             "name": button_name},
+        ]},
     ])
 
 

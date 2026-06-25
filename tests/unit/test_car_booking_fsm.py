@@ -384,9 +384,11 @@ def test_advance_input_task_other_renders_form_card():
     # input name 应该是 task_input
     input_el = next(e for e in form["elements"] if e.get("tag") == "input")
     assert input_el["name"] == "task_input"
-    # button 的 value.action 是 fsm_input_task_form
+    # 2026-06-25 fix：Card 2.0 form submit button 用 name + action_type="form_submit"
+    # （不是 value.action），lark 拒绝缺字段的形式（code: 200673）
     btn = next(e for e in form["elements"] if e.get("tag") == "button")
-    assert btn["value"]["action"] == "fsm_input_task_form"
+    assert btn.get("action_type") == "form_submit"
+    assert btn["name"] == "fsm_input_task_form"
     car_state.clear("ou_task_other")
 
 
@@ -421,8 +423,10 @@ def test_advance_input_location_other_renders_form_card():
     assert form is not None
     input_el = next(e for e in form["elements"] if e.get("tag") == "input")
     assert input_el["name"] == "location_input"
+    # 2026-06-25 fix：Card 2.0 form submit button 用 name + action_type="form_submit"
     btn = next(e for e in form["elements"] if e.get("tag") == "button")
-    assert btn["value"]["action"] == "fsm_input_location_form"
+    assert btn.get("action_type") == "form_submit"
+    assert btn["name"] == "fsm_input_location_form"
     car_state.clear("ou_loc_other")
 
 
