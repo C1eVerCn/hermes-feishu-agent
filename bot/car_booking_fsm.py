@@ -310,6 +310,8 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
         result = json.loads(raw) if isinstance(raw, str) else raw
         if isinstance(result, dict) and "error" in result:
             return STATE_START, {"text": f"提交失败：{result['error']}"}
+        # 2026-06-25：从 commit 响应 message 字段提取 fmp_message（含调度员 email）
+        fmp_message = result.get("message", "") if isinstance(result, dict) else ""
         # 持久化 reservation → applicant 映射（spec §7.2 通知）
         from bot import reservation_store
         key = f"car|{pending_c.vehicle_no}|{pending_c.start_time}"
@@ -320,10 +322,41 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
         log.exception("commit failed")
         return STATE_START, {"text": f"提交异常：{e}"}
 
-    # 2026-06-25 fix：移除预约成功后的 DM。
-    # 根因：DM 内容和 SUCCESS 卡重复（同一份信息发送 2 次），用户困惑。
-    # SUCCESS 卡已在当前对话显示，DM 只用于跨会话通知（如审批结果），不用于
-    # 预约提交（用户刚提交就收 DM 是冗余）。
+    # 2026-06-25 fix：通知同车组调度员/管理员有新预约待审批。
+    # 用 fmp 返的 message（含 "调度员：name(email)" 格式）提取 email，
+    # 然后用 notify 异步 DM 给这些调度员（不发给申请人自己避免重复）。
+    # 申请人已通过 SUCCESS 卡看到预约信息；DM 是给调度员的提醒。
+    try:
+        from feishu import notify
+        from ocl import identity as _identity
+        user_email = _identity.email_of(user_id) or ""
+        # 提取 email —— fmp 消息格式如 "调度员：xxx(name@immotors.com)"，
+        # 用通用 email regex 提取所有 email 地址。
+        import re as _re
+        dispatcher_emails = list(set(_re.findall(
+            r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", fmp_message)))
+        # 排除申请人自己（避免自己给自己发 DM）
+        dispatcher_emails = [e for e in dispatcher_emails if e != user_email]
+        if dispatcher_emails:
+            subject = f"📬 新预约待审批：{pending_c.vehicle_no}"
+            body = (
+                f"新预约提交待您审批：\n\n"
+                f"申请人邮箱：{user_email or '未知'}\n"
+                f"🚗 车辆编号：**{pending_c.vehicle_no}**\n"
+                f"📋 车型：{pending_c.vehicle_type or '-'} · {pending_c.chip or '-'} 芯片\n"
+                f"⏱️ 时段：{pending_c.start_time} ~ {pending_c.end_time}\n"
+                f"📝 任务：{pending_c.task_name}\n"
+                f"📍 地点：{pending_c.location}\n\n"
+                f"💡 可以说「我的待审批」查看待处理列表"
+            )
+            notify.submit_dispatchers_by_email(
+                emails=dispatcher_emails, subject=subject, body=body,
+            )
+            log.info("dispatcher_dm_sent user=%s vehicle=%s dispatchers=%d",
+                     user_id, pending_c.vehicle_no, len(dispatcher_emails))
+    except Exception as e:
+        log.warning("dispatcher_dm_failed: %s", e)
+
     return STATE_SUCCESS, _success_card(user_id)
 
 
