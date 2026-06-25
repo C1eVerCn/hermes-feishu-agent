@@ -244,3 +244,44 @@ def build_fail_card(error: str, *, context: str = "") -> dict:
     return _card_base([
         _div(f"{head}\n\n{error}\n\n请调整后重试或联系管理员。"),
     ])
+
+
+# ── 3. 预约/审批记录卡片（fast-path 用） ────────────────────────────────────
+
+def build_records_card(records: list, *, title: str) -> dict:
+    """2026-06-25 fix：从 bot/handler.py 移过来。fast-path "我的预约" / "我的待审批"
+    渲染 records 表格。records 是 list[dict]，每个含 vehicle_no/platform/start_time/
+    end_time/task_name/status 字段。空列表显示「暂无记录」。
+
+    显示：
+    - 车辆后 6 位（与 build_vehicles_card 一致）
+    - 状态 emoji 徽章（待审批→🟡等）
+    """
+    if not records:
+        return _card_base([
+            _div(f"📋 {title}\n\n（暂无记录）"),
+        ])
+    lines = ["| 车辆 | 平台 | 时间 | 任务 | 状态 |",
+             "|------|------|------|------|------|"]
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        status = r.get("status", "")
+        if status in ("待审批", "已批准", "已驳回", "已取消", "已归还"):
+            badge_map = {
+                "待审批": "🟡待审批", "已批准": "🟢已批准", "已驳回": "🔴已驳回",
+                "已取消": "⚪已取消", "已归还": "✅已归还",
+            }
+            status = badge_map.get(status, status)
+        vno = r.get("vehicle_no", "")
+        vno_short = vno[-6:] if vno and len(vno) >= 6 else vno
+        lines.append(
+            f"| `{vno_short}` "
+            f"| {r.get('platform') or '-'} "
+            f"| {r.get('start_time','')} ~ {r.get('end_time','')} "
+            f"| {r.get('task_name') or '-'} "
+            f"| {status} |"
+        )
+    return _card_base([
+        _div(f"📋 {title}\n\n" + "\n".join(lines)),
+    ])

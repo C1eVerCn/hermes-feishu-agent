@@ -186,7 +186,7 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
                             "tag": "lark_md",
                             "content": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"
                         }}]))
-            card = car_card_builder._build_records_card(
+            card = car_card_builder.build_records_card(
                 items, title=f"📋 我的预约（共 {n} 条）")
             return ("📋 您的预约", card)
         except Exception as e:

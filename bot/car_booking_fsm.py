@@ -320,25 +320,10 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
         log.exception("commit failed")
         return STATE_START, {"text": f"提交异常：{e}"}
 
-    # 2026-06-24 审批通知：预约成功后 DM 申请人（用户同时是 dispatcher 也要看）。
-    # 用 feishu.notify 异步发送，不阻塞 SUCCESS 卡返回。
-    try:
-        from feishu import notify
-        text = (
-            f"📬 **车辆预约已提交，等待调度员审批**\n\n"
-            f"🚗 车辆编号：**{pending_c.vehicle_no}**\n"
-            f"📋 车型：{pending_c.vehicle_type or '-'} · {pending_c.chip or '-'} 芯片\n"
-            f"⏱️ 时段：{pending_c.start_time} ~ {pending_c.end_time}\n"
-            f"📝 任务：{pending_c.task_name}\n"
-            f"📍 地点：{pending_c.location}\n\n"
-            f"⏰ 审批 SLA：通常 10-30 分钟\n"
-            f"💡 可以说「我的预约」查看进度"
-        )
-        notify.submit_text_to_user(user_id, text)
-        log.info("booking_submitted_dm user=%s vehicle=%s", user_id, pending_c.vehicle_no)
-    except Exception as e:
-        log.warning("booking_dm_failed: %s", e)
-
+    # 2026-06-25 fix：移除预约成功后的 DM。
+    # 根因：DM 内容和 SUCCESS 卡重复（同一份信息发送 2 次），用户困惑。
+    # SUCCESS 卡已在当前对话显示，DM 只用于跨会话通知（如审批结果），不用于
+    # 预约提交（用户刚提交就收 DM 是冗余）。
     return STATE_SUCCESS, _success_card(user_id)
 
 
