@@ -15,6 +15,7 @@ import re
 from datetime import datetime, timedelta
 
 from bot import car_state
+from bot import intent
 from car_tools import normalizers
 from car_tools.card_builder import _button_row
 
@@ -295,7 +296,8 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
     # "data 字段不是 dict: NoneType"。必须先注入。
     pending_c = car_state.get(user_id)
     user_email = _identity.email_of(user_id)
-    set_current_caller(CallerIdentity(openid=user_id, email=user_email or ""))
+    set_current_caller(CallerIdentity(openid=user_id, email=user_email or "",
+                                      mobile=_identity.mobile_of(user_id) or None))
     try:
         raw = _h._commit_single_vehicle_reservation({
             "vehicleNo":          pending_c.vehicle_no,
@@ -531,21 +533,9 @@ def _resolve_slot_from_text(text: str, slots: list[dict]) -> dict | None:
     return None
 
 
-# 车辆编号格式：字母 2-5 个 + 数字 3-6 个（spec §3.3 D-1）
-# 2026-06-24 扩展：实际车辆编号格式多样（苏EAM0769 / AATI25SNV630 /
-# TTVX25SPV009 / I23SVV021），不再是 SNV018 这种纯字母+数字。
-# 新规则：1) 5-20 字符；2) 必须以字母或汉字开头；3) 包含至少 1 个数字；
-# 4) 全是字母/数字/汉字（无标点空格）。
-_VEHICLE_NO_RE = re.compile(r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$")
-
-
-def _looks_like_vehicle_id(s: str) -> bool:
-    """2026-06-24：宽松校验。regex + 必须含至少 1 个数字（否则纯汉字/纯字母也算）。"""
-    if not s or len(s) < 5 or len(s) > 20:
-        return False
-    if not _VEHICLE_NO_RE.match(s):
-        return False
-    return any(c.isdigit() for c in s)
+# 车辆编号识别已收口到 bot.intent（单一事实源）。FSM 用 intent.looks_like_vehicle_id
+# 做校验；START 状态保留自身的"中文前缀剥离"逻辑（处理苏EAM0769 这类带中文前缀的
+# 整段编号，与 intent.extract_embedded_vehicle_id 的句中提取语义略有不同）。
 
 
 # LLM 抽取的 stub：MVP 简化版。后续 Task 6 替换为真 LLM 调用。
@@ -603,12 +593,99 @@ def advance(user_id: str, text: str = "") -> tuple[str, dict]:
     return new_state, response
 
 
+# 路由器 slot 键 → car_state 字段映射（router 的 'platform' 即车上芯片 → car_state.chip）
+_ROUTER_SLOT_MAP = {
+    "vehicle_no": "vehicle_no",
+    "vehicle_type_detail": "vehicle_type_detail",
+    "platform": "chip",
+    "duration_minutes": "duration_minutes",
+    "start_time": "start_time",
+    "end_time": "end_time",
+    "task_name": "task_name",
+    "location": "location",
+}
+
+
+def start_booking(user_id: str, slots: dict | None = None) -> tuple[str, dict]:
+    """Tier-2 LLM 判定为 book 后的入口：用抽到的 slots 播种 car_state，跳到第一个
+    "未填槽位"对应的 FSM 状态并渲染其卡片（"说全了的人"直接落到确认卡）。
+
+    这是 router-first 设计给用户的"自由度"：流程仍由 FSM 这条安全轨执行（必填校验/
+    权限/dry_run→commit 不变），但**入口被 LLM 抽到的槽位提前**，不再被 8 步按钮 march。
+    """
+    slots = slots or {}
+    car_state.clear(user_id)
+    seed: dict = {"intent": "booking"}
+    for rk, ck in _ROUTER_SLOT_MAP.items():
+        v = slots.get(rk)
+        if v not in (None, "", []):
+            seed[ck] = v
+    car_state.save(user_id, **seed)
+    return _resume_seeded(user_id)
+
+
+def _resume_seeded(user_id: str) -> tuple[str, dict]:
+    """根据已播种的槽位，定位"第一个缺口"状态并渲染对应卡片。
+
+    对 advance("") 能干净渲染的状态（START / SELECT_DURATION / DURATION_CONFIRM）走
+    advance("")；对 advance("") 会吐"未识别/不能为空"错误文案的状态（CONFIRM_CHIP /
+    INPUT_TASK / INPUT_LOCATION / CONFIRM）直接渲染卡片，避免给用户看到突兀的报错。
+    """
+    p = car_state.get(user_id)
+    # 时段镜像：start_booking 播种的是 start_time/end_time，但 _confirm_card 读
+    # time_range_start/end（FSM 选时段分支才填）。这里补齐，避免确认卡时段显示空白。
+    if p.start_time and p.end_time and not p.time_range_start:
+        car_state.save(user_id, time_range_start=p.start_time, time_range_end=p.end_time)
+        p = car_state.get(user_id)
+    # 1) 完全没有车辆线索 → 入口卡（让用户选"知道编号/帮我查"）
+    if not p.vehicle_no and not p.vehicle_type_detail:
+        car_state.save(user_id, state=STATE_START)
+        return advance(user_id, "")
+    # 2) 有车型、无芯片、无编号 → 选芯片
+    if p.vehicle_type_detail and not p.chip and not p.vehicle_no:
+        car_state.save(user_id, state=STATE_CONFIRM_CHIP)
+        return STATE_CONFIRM_CHIP, {
+            "text": f"已选车型 {p.vehicle_type_detail}。请选择芯片平台：",
+            "card": _chip_card(vehicle_type_detail=p.vehicle_type_detail),
+        }
+    # 时长缺省补 30min（不算"缺口"）
+    if not p.duration_minutes:
+        car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
+        p = car_state.get(user_id)
+    # 3) 无编号（但有车型±芯片）→ 选时长（确认后 SELECT_FROM_LIST 查车）
+    if not p.vehicle_no:
+        car_state.save(user_id, state=STATE_SELECT_DURATION)
+        return advance(user_id, "")
+    # 4) 有编号、缺时段 → DURATION_CONFIRM 渲染时段下拉
+    if not (p.start_time and p.end_time):
+        car_state.save(user_id, state=STATE_DURATION_CONFIRM)
+        return advance(user_id, "")
+    # 5) 有编号+时段、缺任务 → 输入任务
+    if not p.task_name:
+        car_state.save(user_id, state=STATE_INPUT_TASK)
+        return STATE_INPUT_TASK, {
+            "text": ("**📝 请输入任务名称**\n\n"
+                     "💡 点下方常用任务快速填入，或直接输入；点「其它」自由输入"),
+            "buttons": [_task_button(t) for t in TASK_HINT_BUTTONS],
+        }
+    # 6) 缺地点 → 输入地点
+    if not p.location:
+        car_state.save(user_id, state=STATE_INPUT_LOCATION)
+        return STATE_INPUT_LOCATION, {
+            "text": ("**📍 请输入测试地点**\n\n"
+                     "💡 点下方常用地点快速填入，或直接输入；点「其它」自由输入"),
+            "buttons": [_location_button(c) for c in LOCATION_BUTTONS],
+        }
+    # 7) 全齐 → 最终确认卡
+    car_state.save(user_id, state=STATE_CONFIRM)
+    return STATE_CONFIRM, {"card": _confirm_card(user_id)}
+
+
 def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tuple[str, dict]:
     """内部 advance 逻辑：返回 (new_state, response)。不持久化 state。"""
 
-    # 全局重置：用户在任何状态说"我想约车"等约车意图时，清状态回到入口
-    BOOKING_INTENT_PHRASES = ("我想约车", "我要约车", "帮我约车", "约车", "预约车")
-    if text in BOOKING_INTENT_PHRASES and current_state != STATE_START:
+    # 全局重置：用户在任何状态又说"约车"等约车意图时，清状态回到入口
+    if text in intent.BOOKING_RESET_PHRASES and current_state != STATE_START:
         car_state.clear(user_id)
         return STATE_START, _entry_card()
 
@@ -620,10 +697,10 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     # 2026-06-24 review fix：CONFIRM 状态有自己的"取消"处理（清预约信息+回 START），
     # 不应该被全局 escape 屏蔽——后者会把 CONFIRM 的 [❌ 取消] 按钮走错路径。
     # 因此 ESCAPE 只对"等待用户输入"型状态触发；CONFIRM 走自己的分支。
-    ESCAPE_PHRASES = ("算了", "取消", "退出", "不约了", "放弃", "不选了")
+    # escape 短语收口到 bot.intent（单一事实源）。
     ESCAPE_STATES = (STATE_DURATION_CONFIRM, STATE_SELECT_TIME,
                      STATE_INPUT_TASK, STATE_INPUT_LOCATION)
-    if (text.strip() in ESCAPE_PHRASES
+    if (intent.is_escape(text)
             and current_state in ESCAPE_STATES):
         car_state.clear(user_id)
         return STATE_START, _entry_card()
@@ -635,7 +712,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 优先识别"报编号"快捷路径（用户在 START 直接报编号）
         # 2026-06-24：先尝试整段匹配（短文本）；不通过则从 token 中剥离中文前缀找嵌入编号
         text_stripped = (text or "").strip()
-        if (text_stripped and _looks_like_vehicle_id(text_stripped.upper())
+        if (text_stripped and intent.looks_like_vehicle_id(text_stripped.upper())
                 and not any('一' <= c <= '鿿' for c in text_stripped[1:])):
             # 整段是纯 vehicle_id（不含中文），直接用
             car_state.save(user_id, vehicle_no=text_stripped.upper())
@@ -649,11 +726,11 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             stripped = upper
             while stripped and '一' <= stripped[0] <= '鿿':
                 stripped = stripped[1:]  # 剥汉字前缀
-            if stripped and _looks_like_vehicle_id(stripped):
+            if stripped and intent.looks_like_vehicle_id(stripped):
                 car_state.save(user_id, vehicle_no=stripped)
                 return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
             # 如果 token 整体就是 vehicle_id（剥不到汉字后也没变化）也接受
-            if _looks_like_vehicle_id(upper):
+            if intent.looks_like_vehicle_id(upper):
                 car_state.save(user_id, vehicle_no=upper)
                 return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
         # 收到"知道"按钮回调 → DIRECT_BY_ID
@@ -947,7 +1024,7 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
     # DIRECT_BY_ID：用户直接报编号（spec §3.3）
     if current_state == STATE_DIRECT_BY_ID:
         vehicle_no = text.strip().upper()
-        if not _looks_like_vehicle_id(vehicle_no):
+        if not intent.looks_like_vehicle_id(vehicle_no):
             return STATE_DIRECT_BY_ID, {
                 "text": (f"❌ 编号格式不符「{vehicle_no}」\n\n"
                          f"💡 正确格式：字母/汉字开头 + 含数字 + 5-15 字符（如 SNV018 / 苏EAM0769）\n"

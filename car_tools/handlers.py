@@ -37,6 +37,10 @@ def _inject_caller(args: dict) -> dict:
     `TypeError: got an unexpected keyword argument 'openId'`，所有走 _call_mcp
     路径的 fast-path / handler 工具调用都失败。
     openid 仍可通过 CallerIdentity 在 OCL L1/L2 鉴权层读取，不必传给上游 fmp。
+
+    2026-06-25：mobile 同理**不**注入上游 —— 上游每个 @Tool 都以 emailAddress 为识别符、
+    签名里没有 mobile 参数（注入会 TypeError）。手机号是本系统的**第二识别符**（存
+    identity_map、随 CallerIdentity 透传、可按手机号查人），上游接入 mobile 参数前不下传。
     """
     caller = get_current_caller()
     injected: dict[str, Any] = {}

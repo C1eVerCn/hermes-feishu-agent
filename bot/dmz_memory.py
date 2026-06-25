@@ -37,6 +37,8 @@ _SENSITIVE_KEYS = {
 "token", "access_token", "refresh_token", "cookie", "session_key",
 "minimax_api_key", "feishu_app_secret", "vlm_api_key",
 "FEISHU_APP_SECRET", "MINIMAX_API_KEY",
+# 手机号 / open_id 同为 PII（与 emailAddress 同级，永不落盘）
+"mobile", "phone", "mobileNumber", "phoneNumber", "openId", "open_id",
 }
 
 

@@ -29,6 +29,10 @@ _miss_cache: set[str] = set()
 # 反向索引：email → open_id（从 identity_map.json v2 schema 扫出来）
 # 用于 Feishu v3 不支持 email→open_id lookup 时本地直查
 _email_to_oid_cache: dict[str, str] = {}
+# 手机号是第二识别符（邮箱为主）：open_id → mobile 及反向 mobile → open_id，
+# 同样从 identity_map.json v2 schema 扫出来（飞书 contact v3 默认无 mobile 权限）。
+_mobile_cache: dict[str, str] = {}
+_mobile_to_oid_cache: dict[str, str] = {}
 
 # ── role overrides from identity_map.json ─────────────────────────────────
 _role_overrides: dict[str, int] = {}
@@ -71,6 +75,8 @@ def _load_role_overrides() -> dict[str, int]:
     # (re)load — clear first so deletions on disk are reflected
     _role_overrides.clear()
     _email_to_oid_cache.clear()
+    _mobile_cache.clear()
+    _mobile_to_oid_cache.clear()
     try:
         with open(_MAP_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -85,6 +91,11 @@ def _load_role_overrides() -> dict[str, int]:
                     email = v.get("email") or ""
                     if email and email not in _email_to_oid_cache:
                         _email_to_oid_cache[email] = k
+                    # 手机号同样建正向/反向索引（第二识别符）。
+                    mobile = (v.get("mobile") or "").strip()
+                    if mobile:
+                        _mobile_cache[k] = mobile
+                        _mobile_to_oid_cache.setdefault(mobile, k)
                 elif isinstance(v, int):
                     _role_overrides[k] = v
     except Exception:
@@ -98,6 +109,8 @@ def _invalidate_role_overrides() -> None:
     global _role_overrides_loaded, _role_overrides_mtime
     _role_overrides.clear()
     _email_to_oid_cache.clear()
+    _mobile_cache.clear()
+    _mobile_to_oid_cache.clear()
     _role_overrides_loaded = False
     _role_overrides_mtime = None
 
@@ -147,9 +160,27 @@ def email_of(open_id: str) -> str:
 
 
 def mobile_of(open_id: str) -> str:
-    """Stub: 飞书 contact v3 当前不返回 mobile。返回 ""（空字符串即未配置）。
-    2026 Q3 接入飞书 contact v3 mobile 权限后此函数会真返回手机号字符串。"""
-    return ""
+    """open_id → 手机号（第二识别符）。
+
+    来源优先级：identity_map.json（管理员/同步写入的 ``mobile`` 字段）。飞书 contact v3
+    默认无 mobile 权限，故不从飞书 API 解析（拿到权限后可在此补充，与 email_of 同构）。
+    无配置返回 ""。
+    """
+    if not open_id:
+        return ""
+    _load_role_overrides()  # 确保 _mobile_cache 已填充（mtime 变化时重载）
+    with _lock:
+        return _mobile_cache.get(open_id, "")
+
+
+def open_id_of_mobile(mobile: str) -> str:
+    """反向：手机号 → open_id（本地 identity_map 索引）。未知返回 ""。"""
+    mobile = (mobile or "").strip()
+    if not mobile:
+        return ""
+    _load_role_overrides()
+    with _lock:
+        return _mobile_to_oid_cache.get(mobile, "")
 
 
 def build_caller_identity(open_id: str) -> "CallerIdentity":

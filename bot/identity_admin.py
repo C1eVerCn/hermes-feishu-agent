@@ -151,7 +151,7 @@ class IdentityAdmin:
 
     # ── 写 API ──
 
-    def auto_register(self, open_id, email="", name=""):
+    def auto_register(self, open_id, email="", name="", mobile=""):
         """首次接触时调用：建档 role=0 pending。
 
         已存在则不覆盖（避免盖掉 admin 设置的角色）。
@@ -162,6 +162,7 @@ class IdentityAdmin:
             record = {
                 "email": email or "",
                 "name": name or "",
+                "mobile": mobile or "",
                 "role": 0,
                 "registered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "registered_via": "auto_first_contact",
@@ -191,8 +192,8 @@ class IdentityAdmin:
         self._audit("set_role", open_id, before, after, operator=operator, note=note)
         return True, "ok"
 
-    def update_profile(self, open_id, email=None, name=None, operator="system"):
-        """更新 email/name（不触发角色变化）。"""
+    def update_profile(self, open_id, email=None, name=None, mobile=None, operator="system"):
+        """更新 email/name/mobile（不触发角色变化）。"""
         with _lock:
             if open_id not in self._data:
                 return False, "not_found"
@@ -202,10 +203,32 @@ class IdentityAdmin:
                 after["email"] = email
             if name is not None:
                 after["name"] = name
+            if mobile is not None:
+                after["mobile"] = mobile
             self._data[open_id] = after
             self._save()
         self._audit("update_profile", open_id, before, after, operator=operator)
         return True, "ok"
+
+    def find_by_mobile(self, mobile):
+        """按手机号反查 (open_id, record)；未找到返回 None。手机号是第二识别符（邮箱为主）。"""
+        mobile = (mobile or "").strip()
+        if not mobile:
+            return None
+        for oid, rec in self._data.items():
+            if isinstance(rec, dict) and (rec.get("mobile") or "").strip() == mobile:
+                return oid, rec
+        return None
+
+    def find_by_email(self, email):
+        """按邮箱反查 (open_id, record)；未找到返回 None。"""
+        email = (email or "").strip()
+        if not email:
+            return None
+        for oid, rec in self._data.items():
+            if isinstance(rec, dict) and (rec.get("email") or "").strip() == email:
+                return oid, rec
+        return None
 
     def bulk_upsert_from_feishu_org(self, members):
         """启动时拉全组织成员批量建档。members: [{open_id, email, name}]。

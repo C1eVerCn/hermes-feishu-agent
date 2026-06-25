@@ -48,9 +48,10 @@ def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | No
     """
     action = value.get("action", "")
     email = identity.email_of(open_id)
+    mobile = identity.mobile_of(open_id)
 
     # 注入身份（commit 路径走 handler 需要 caller）
-    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=None))
+    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=mobile or None))
 
     try:
         # ── 取消流程（任意卡片通用） ─────────────────────────────────
@@ -159,7 +160,8 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
         from car_tools import card_builder as car_card_builder
         from bot.car_booking_fsm import _card_wrap
         email = _ident.email_of(open_id)
-        set_current_caller(CallerIdentity(openid=open_id, email=email or ""))
+        set_current_caller(CallerIdentity(openid=open_id, email=email or "",
+                                          mobile=_ident.mobile_of(open_id) or None))
         try:
             raw = fetch_user_reservation({})
             result = json.loads(raw) if isinstance(raw, str) else raw
@@ -221,7 +223,8 @@ def _handle_select_vehicle(open_id: str, chat_id: str, vehicle_no: str,
         platform=platform,
         license_plate=license_plate,
     )
-    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=None))
+    set_current_caller(CallerIdentity(openid=open_id, email=email,
+                                      mobile=identity.mobile_of(open_id) or None))
     # 推进 FSM：把 state 切到 DURATION_CONFIRM（vehicle_no 已存）让 FSM 渲染时段选项
     car_state.save(open_id, state="DURATION_CONFIRM")
     new_state, response = car_booking_fsm.advance(open_id, "")
@@ -240,7 +243,8 @@ def _handle_confirm_booking(open_id: str, chat_id: str, value: dict,
     不在调用方再做显式 check。
     """
     args = {k: v for k, v in value.items() if k != "action" and v}
-    set_current_caller(CallerIdentity(openid=open_id, email=email, mobile=None))
+    set_current_caller(CallerIdentity(openid=open_id, email=email,
+                                      mobile=identity.mobile_of(open_id) or None))
     raw = car_handlers._commit_single_vehicle_reservation(args)
     car_state.clear(open_id)
 

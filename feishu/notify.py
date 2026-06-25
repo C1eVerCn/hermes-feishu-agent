@@ -1,8 +1,8 @@
 """Feishu proactive notification helpers.
 
 Sends outbound Feishu DMs (text only) for two flows:
-- After successful reserve_bench, fan out to every dispatcher in the bench's
-  group (best-effort) so they can approve in a timely manner.
+- After a successful vehicle reservation, fan out to every dispatcher in the
+  vehicle's group (best-effort) so they can approve in a timely manner.
 - After a dispatcher approves a reservation, notify the original applicant.
 
 DESIGN (post code-review fixes #2/#3/#6):
@@ -235,13 +235,13 @@ def submit_dispatchers_by_email_blocking(emails: Iterable[str], subject: str, bo
 
 
 # ── Email extraction (moved from card_action_handler) ──────────────────────
-# Parses "姓名：张三，邮箱：zhangsan@x.com" out of the bench API's success
+# Parses "姓名：张三，邮箱：zhangsan@x.com" out of the reservation API's success
 # message: '预约成功！调度员信息：\\n姓名：A，邮箱：a@x\\n姓名：B，邮箱：b@y'
 _EMAIL_RE = re.compile(r"邮箱[：:]\s*([\w.+-]+@[\w.-]+)")
 
 
 def extract_scheduler_emails(api_message: str) -> list[str]:
-    """Return de-duplicated list of emails in the bench API success message,
+    """Return de-duplicated list of emails in the reservation API success message,
     preserving order. Empty list if no emails found."""
     out: list[str] = []
     seen: set[str] = set()

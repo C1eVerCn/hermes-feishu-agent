@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from bot import handler, car_state, identity_admin
 from bot.car_booking_fsm import (
-    STATE_START, STATE_SELECT_VEHICLE_TYPE, STATE_CONFIRM_CHIP, STATE_VEHICLE_ENTRY,
+    STATE_START, STATE_SELECT_VEHICLE_TYPE, STATE_CONFIRM_CHIP,
     STATE_SELECT_DURATION, STATE_SELECT_FROM_LIST, STATE_DURATION_CONFIRM,
     STATE_INPUT_TASK, STATE_INPUT_LOCATION, STATE_CONFIRM, STATE_COMMIT, STATE_SUCCESS,
 )
@@ -130,33 +130,39 @@ def teardown_module():
 # ── Test cases ─────────────────────────────────────────────────────────
 
 def test_5_round_step_by_step():
-    """5 轮"一步一步走"约车全流程。"""
+    """多轮"一步一步走"约车：文本进入口卡 + 卡片按钮逐步推进（走真实回调路径）。"""
+    from bot import card_action_handler as cah
     car_state.clear("ou_e2e")
-    handler._handle(_event("我想约车", "m1"))  # 1) START → SELECT_VEHICLE_TYPE
+    # 1) "我想约车"（文本）→ START 入口卡（advance 不持久化 START）
+    handler._handle(_event("我想约车", "m1"))
+    p = car_state.get("ou_e2e")
+    assert p is None or p.state == STATE_START, \
+        f"step1 expected START/None, got {p.state if p else None}"
+
+    # 2) 点「不知道（帮我查）」按钮 → SELECT_VEHICLE_TYPE
+    cah.handle("ou_e2e", {"action": "fsm_known_no"})
     assert car_state.get("ou_e2e").state == STATE_SELECT_VEHICLE_TYPE, \
-        f"step1 expected SELECT_VEHICLE_TYPE, got {car_state.get('ou_e2e').state}"
+        f"step2 expected SELECT_VEHICLE_TYPE, got {car_state.get('ou_e2e').state}"
 
-    handler._handle(_event("大F车", "m2"))  # 2) SELECT_VEHICLE_TYPE → CONFIRM_CHIP
-    pending = car_state.get("ou_e2e")
-    assert pending.state == STATE_CONFIRM_CHIP, \
-        f"step2 expected CONFIRM_CHIP, got {pending.state}"
+    # 3) 选车型 BM0（下拉）→ CONFIRM_CHIP
+    cah.handle("ou_e2e", {"action": "fsm_select_type", "value": "BM0"})
+    assert car_state.get("ou_e2e").state == STATE_CONFIRM_CHIP, \
+        f"step3 expected CONFIRM_CHIP, got {car_state.get('ou_e2e').state}"
 
-    handler._handle(_event("Xavier", "m3"))  # 3) CONFIRM_CHIP → VEHICLE_ENTRY
-    pending = car_state.get("ou_e2e")
-    assert pending.state == STATE_VEHICLE_ENTRY, \
-        f"step3 expected VEHICLE_ENTRY, got {pending.state}"
+    # 4) 选芯片 Xavier → SELECT_DURATION（默认 30 分钟）
+    cah.handle("ou_e2e", {"action": "fsm_select_chip", "value": "Xavier"})
+    p = car_state.get("ou_e2e")
+    assert p.state == STATE_SELECT_DURATION, \
+        f"step4 expected SELECT_DURATION, got {p.state}"
+    assert p.duration_minutes == 30
 
-    handler._handle(_event("帮我查", "m4"))  # 4) VEHICLE_ENTRY → SELECT_DURATION
-    pending = car_state.get("ou_e2e")
-    assert pending.state == STATE_SELECT_DURATION, \
-        f"step4 expected SELECT_DURATION, got {pending.state}"
-
-    handler._handle(_event("1小时", "m5"))  # 5) SELECT_DURATION → SELECT_FROM_LIST
-    pending = car_state.get("ou_e2e")
-    assert pending.state == STATE_SELECT_FROM_LIST, \
-        f"step5 expected SELECT_FROM_LIST, got {pending.state}"
-    assert len(pending.last_vehicles) == 2, \
-        f"step5 expected 2 vehicles, got {len(pending.last_vehicles)}"
+    # 5) 点时长「确认」（无 vehicle_no）→ SELECT_FROM_LIST（查车，_FakeMcp 返 2 辆）
+    cah.handle("ou_e2e", {"action": "fsm_dur_confirm"})
+    p = car_state.get("ou_e2e")
+    assert p.state == STATE_SELECT_FROM_LIST, \
+        f"step5 expected SELECT_FROM_LIST, got {p.state}"
+    assert len(p.last_vehicles) == 2, \
+        f"step5 expected 2 vehicles, got {len(p.last_vehicles)}"
 
 
 def test_one_shot_booking():

@@ -1,21 +1,31 @@
-"""bot/handler — 飞书消息 → 业务处理 → 飞书卡片回复。
+"""bot/handler — 飞书消息路由总枢纽（two-tier routing）。
 
-层级（车辆预约域）：
-- Layer 0      闲聊/打招呼/帮助（无 agent，<1ms）
-- Layer 0.5    快速路径：查车 / 我的预约 / 我的待审批
-- Layer 0.6    快速路径：预约 dry_run
-- Layer "car"  状态机：用户在挂起状态时收到字段补充、escape 等
-- Identity / admin commands (bypass agent)
-- Agent path   复杂自由文本 → AIAgent → OCL pipeline → 卡片
+2026-06-25 重构：意图识别收口到 :mod:`bot.intent`（单一事实源），文案/身份/管理命令
+拆到 :mod:`bot.replies`，查询快速路径拆到 :mod:`bot.fast_path`。本文件只做**编排**。
+
+路由分层（从快到慢、从确定到自由）：
+
+- **Tier 1（确定性，零歧义，瞬回）**
+  - Layer 0    问候/帮助/能力介绍（replies.match_simple_intent）
+  - 身份闸     解析 email/role，注入 CallerIdentity
+  - FSM 续答   用户在挂起状态：escape / 查询逃逸 / 继续推进
+  - 快速路径   精确查询短语 → 直接调工具（fast_path）
+  - 约车意图   intent.is_booking_intent → FSM
+  - 身份/管理  我的权限 / 设置角色 / 查看用户
+
+- **Tier 2（LLM 结构化分类，理解措辞多样/表达有问题的消息）**
+  - intent_router.classify → book(带槽位) / query_* / identity / chitchat / unknown
+  - book → fsm.start_booking 用槽位播种、跳到第一个缺口
+  - query_* → fast_path 执行
+  - unknown/低置信/cancel/return/approve → 完整 agent 自由推理（OCL 守卫）
+
+- **Agent 路径（兜底，最大自由度）** AIAgent.chat → OCL pipeline → 卡片
 """
+import contextvars
 import json
 import logging
-import re
 import time
-import contextvars
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-from datetime import datetime, timedelta
-from typing import Optional
 
 from lark_oapi.api.im.v1 import P2ImMessageReceiveV1
 
@@ -25,185 +35,32 @@ from feishu import sender
 from feishu import notify
 from bot.agent_pool import agent_pool
 from bot import car_state
+from bot import intent
+from bot import intent_router
+from bot import replies
+from bot import fast_path
+from bot import car_booking_fsm
 from infra.metrics import metrics
 from ocl.pipeline import apply as ocl_apply
-from ocl.tool_guard import (
-    set_current_caller, set_current_user, set_current_email,
-    CallerIdentity, get_current_caller,
-)
+from ocl.tool_guard import set_current_caller, CallerIdentity
 from ocl import identity
 from bot.identity_admin import get_admin as get_identity_admin
 from ocl import tool_capture
-from car_tools import handlers as car_handlers
-from car_tools import card_builder as car_card_builder
+from ocl import intent_filter
 
 log = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="agent-worker")
 
-# 状态机：escape 关键词（用户说「算了/换个/不订了」→ clear state）
-_ESCAPE_PHRASES = ("算了", "换个", "不订了", "取消", "放弃", "不要了")
-
-# 状态机：confirm 文本路径（用户在挂起状态回复「确认」→ 走 commit）
-_CONFIRM_PHRASES = ("确认", "确定", "ok", "yes", "yep", "yeah")
-
 _EMPTY_REPLY = "您好，请输入文字消息，我来为您解答。"
 _TIMEOUT_REPLY = "抱歉，响应超时（>120s），请稍后重试。"
 _ERROR_REPLY = "抱歉，处理您的消息时出现了错误，请稍后再试。"
 _INPUT_TOO_LONG_REPLY = "抱歉，消息过长（超过 8000 字），请分段发送。"
+_STRANGER_REPLY = "无法识别您的身份（未获取到 open_id），请在飞书私聊中直接发消息后重试。"
 _MAX_INPUT_CHARS = 8000
-
-# ── Layer 0: Simple intent ────────────────────────────────────────────────
-
-_SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
-    (re.compile(r'^(你好|hi|hello|hey|嗨|哈[啰咯]|早上好|下午好|晚上好|good\s*morning|good\s*afternoon|good\s*evening)[\s!！。.]*$', re.IGNORECASE),
-     "你好！我是约车助手，专注于车辆预约管理（查询 / 预约 / 取消 / 归还 / 审批）。\n输入「帮助」了解我能做什么。"),
-    (re.compile(r'^(谢谢|感谢|thanks|thank\s*you|3q|多谢|谢了|辛苦)[\s!！。.]*$', re.IGNORECASE),
-     "不客气！有需要随时找我。"),
-    (re.compile(r'^(再见|bye|拜拜|88|回见|下次聊)[\s!！。.]*$', re.IGNORECASE),
-     "再见！有需要随时找我。"),
-    (re.compile(r'^(在吗|在不在|在线吗)[\s!！。.?？]*$'),
-     "在的！有什么可以帮您的？"),
-    (re.compile(r'^(你是谁|你叫什么|你是做什么的|你能做什么|你能帮我做什么|你能帮我吗|你能干什么|介绍一下你自己)[\s!！。.?？]*$'),
-     "我是约车助手，可以帮您：\n• 查询可用车辆\n• 预约 / 取消 / 归还车辆\n• 查询我的预约\n• （调度员/管理员）审批预约、查询待审批\n\n输入「我的权限」查看当前角色。"),
-    (re.compile(r'^(帮助|help|怎么用|怎么操作|使用说明|功能)[\s!！。.?？]*$', re.IGNORECASE),
-     "📋 我能帮你做的事情：\n\n🔍 查询类\n• 查询可用车辆（指定时间 + 平台 + 类型）\n• 查询我的预约\n• （调度员）查询待审批列表\n\n✏️ 操作类\n• 预约车辆（两步流程：选车 → 确认）\n• 取消待审批的预约\n• 归还已批准的车辆\n\n🛡️ 调度员/管理员\n• 审批预约\n\n💡 输入「我的权限」查看当前角色"),
-    (re.compile(r'^(好[的]?|ok|嗯|哦|知道了|明白了|懂了|收到|了解|got\s*it)[\s!！。.]*$', re.IGNORECASE),
-     "好的，有问题随时找我。"),
-]
-
-_MY_PERMS = re.compile(r'我的权限|查看.*权限|我的角色')
-_ADMIN_SET_ROLE = re.compile(r'^设置角色\s+(\S+)\s+([123])$')
-_ADMIN_LIST_USERS = re.compile(r'^查看用户(?:\s+(\S+))?$')
-
-_ROLE_NAME = {0: "非平台用户", 1: "普通用户", 2: "调度员", 3: "管理员"}
-_ROLE_BY_NAME = {"待审核": 0, "非平台用户": 0, "普通用户": 1, "调度员": 2, "管理员": 3}
-
-
-def _admin_ids() -> set[str]:
-    raw = getattr(settings, "OCL_ADMIN_USER_IDS", "")
-    return {uid.strip() for uid in raw.split(",") if uid.strip()}
-
-
-def _is_admin(user_id: str) -> bool:
-    return user_id in _admin_ids() or identity.role_of(user_id) == 3
-
-
-def _resolve_role_with_env_admin(admin, user_id: str, role: int) -> int:
-    if role < 3 and user_id in _admin_ids():
-        admin.set_role(user_id, 3, operator="ocl_admin_env",
-                       note="auto-elevated from OCL_ADMIN_USER_IDS")
-        return 3
-    return role
-
-
-_ROLE_CAPS = {
-    1: "可查询可用车辆、预约/取消/归还车辆、查询自己的预约记录。",
-    2: "在普通用户基础上，可审批本组车辆预约、查询本组待审批列表。",
-    3: "拥有全部权限（含跨组审批等系统级操作）。",
-}
-
-
-def _identity_preamble(user_id: str, role: int, name: str) -> str:
-    role_name = _ROLE_NAME.get(role, "未知")
-    caps = _ROLE_CAPS.get(role, "")
-    who = f"当前对话用户：{name}（角色：{role_name}，role={role}）。" if name \
-        else f"当前对话用户角色：{role_name}（role={role}）。"
-    return (
-        "［系统已核验的用户身份，以此为准，不要自行推断或质疑］\n"
-        f"{who}\n"
-        f"权限范围：{caps}\n"
-        "回答涉及「你是谁/我的权限/我能做什么」时，必须依据上述角色，"
-        "不得默认对方是普通用户。\n"
-        "［领域边界 — 2026-06-25］你是车辆预约管理机器人，**只**处理车辆预约/"
-        "审批/归还/记录查询等业务。对股票/天气/纳指/聊天/其他无关问题，"
-        "请礼貌拒绝并引导用户：「我仅能帮您处理车辆预约相关需求，请试试约车、"
-        "查询预约、查询待审批等功能」。\n"
-        "———\n"
-        "用户消息："
-    )
-
-
-def _handle_identity_query(text: str, user_id: str) -> str:
-    if _MY_PERMS.search(text):
-        admin = get_identity_admin()
-        role = admin.get_role(user_id)
-        if role == 0:
-            return (f"您当前是【待审核】用户，无平台权限。\n"
-                    f"请联系管理员开通，并提供您的 open_id：\n"
-                    f"{user_id}")
-        role_name = {1: "普通用户", 2: "调度员", 3: "管理员"}.get(role, "未知")
-        caps = {
-            1: "可查询可用车辆、预约/取消/归还车辆、查询自己的预约记录。",
-            2: "可审批本组车辆预约、查询本组待审批列表。",
-            3: "拥有全部权限（含跨组审批等系统级操作）。",
-        }.get(role, "")
-        # 2026-06-18 引导：角色不够时告诉用户怎么自助升级 + 怎么改 MCP 端角色
-        upgrade_hint = ""
-        if role == 1:
-            upgrade_hint = ("\n\n💡 如需审批/管理权限：\n"
-                            "  • 联系管理员让其执行「设置角色 <你的 open_id> 2」\n"
-                            "  • 或在 .env 加 OCL_ADMIN_USER_IDS=<你的 open_id> 自动升级到管理员\n"
-                            "  • 注意：MCP 端设置的角色不会自动同步到这里，需要在本系统独立设置")
-        elif role == 2:
-            upgrade_hint = ("\n\n💡 如需管理员权限：联系现有管理员执行「设置角色 <你的 open_id> 3」")
-        return f"您是【{role_name}】。\n{caps}{upgrade_hint}"
-    return ""
-
-
-def _handle_admin_command(text: str, user_id: str) -> str:
-    if not _is_admin(user_id):
-        return ""
-    m = _ADMIN_SET_ROLE.match(text)
-    if m:
-        target, role = m.group(1), int(m.group(2))
-        admin = get_identity_admin()
-        ok, msg = admin.set_role(target, role, operator=user_id, note="via_feishu_admin_command")
-        if not ok:
-            return f"设置失败：{msg}"
-        return f"已设置 {target} 的角色为 {_ROLE_NAME[role]}。"
-    m = _ADMIN_LIST_USERS.match(text)
-    if m:
-        return _format_user_list(m.group(1))
-    return ""
-
-
-def _format_user_list(filter_arg: str | None) -> str:
-    admin = get_identity_admin()
-    users = admin.list_all()
-    if not users:
-        return "当前没有任何用户记录。"
-    if filter_arg and filter_arg in users:
-        rec = users[filter_arg]
-        return (f"用户 {filter_arg}：\n"
-                f"• 角色：{_ROLE_NAME.get(int(rec.get('role', 0)), '未知')}\n"
-                f"• 姓名：{rec.get('name', '') or '(未知)'}\n"
-                f"• 邮箱：{rec.get('email', '') or '(未知)'}\n"
-                f"• 建档方式：{rec.get('registered_via', '') or '(未知)'}")
-    role_filter = _ROLE_BY_NAME.get(filter_arg) if filter_arg else None
-    if filter_arg and role_filter is None and filter_arg not in users:
-        return (f"未找到用户或角色「{filter_arg}」。\n"
-                "用法：「查看用户」全部 / 「查看用户 调度员」按角色 / 「查看用户 ou_xxx」按 open_id。")
-    lines: list[str] = []
-    by_role: dict[int, list[str]] = {0: [], 1: [], 2: [], 3: []}
-    for oid, rec in users.items():
-        r = int(rec.get("role", 0))
-        if role_filter is not None and r != role_filter:
-            continue
-        by_role.setdefault(r, []).append(
-            f"  • {rec.get('name', '') or '(无名)'} | {rec.get('email', '') or '(无邮箱)'} | {oid}")
-    total = sum(len(v) for v in by_role.values())
-    header = f"📋 用户列表（共 {total} 人）" + (f"，筛选：{filter_arg}" if filter_arg else "")
-    lines.append(header)
-    for r in (3, 2, 1, 0):
-        if by_role.get(r):
-            lines.append(f"\n【{_ROLE_NAME[r]}】{len(by_role[r])} 人")
-            lines.extend(by_role[r])
-    return "\n".join(lines)
 
 
 # ── 入口 ─────────────────────────────────────────────────────────────────
-
 def start_consumer() -> None:
     log.info("Event consumer started")
     while True:
@@ -219,8 +76,7 @@ def start_consumer() -> None:
 
 def _handle(data: P2ImMessageReceiveV1) -> None:
     msg = data.event.message
-    sender_info = data.event.sender
-    user_id = sender_info.sender_id.open_id
+    user_id = data.event.sender.sender_id.open_id
     chat_id = msg.chat_id
 
     if user_id:
@@ -229,205 +85,196 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     log.info("received message_id=%s chat_id=%s user_id=%s", msg.message_id, chat_id, user_id)
 
     text = _extract_text(msg)
-
     if not text:
         sender.send_text_as_card(chat_id, _EMPTY_REPLY)
         return
-
     if len(text) > _MAX_INPUT_CHARS:
         sender.send_text_as_card(chat_id, _INPUT_TOO_LONG_REPLY)
         return
 
-    # ── Layer 0: Simple intent（先于身份闸，避免问候语被 18s 飞书 API 阻塞） ──
-    instant = _match_simple_intent(text)
+    # ── Layer 0: 即时文案（先于身份闸，避免问候被 18s 飞书 API 阻塞）──────────
+    instant = replies.match_simple_intent(text)
     if instant:
         sender.send_text_as_card(chat_id, instant)
         return
 
-    # ── 身份闸 ─────────────────────────────────────────────────────────
-    admin = get_identity_admin()
-    email = identity.email_of(user_id)
-    name = identity.name_of(user_id)
-    if user_id:
-        admin.auto_register(user_id, email=email, name=name)
-        if email:
-            existing = admin.get(user_id) or {}
-            if existing.get("email") != email:
-                admin.update_profile(user_id, email=email, name=name or existing.get("name", ""),
-                                     operator="auto_email_sync")
-        if admin.get_role(user_id) == 0:
-            admin.set_role(user_id, 1, operator="auto_in_scope",
-                           note=f"in-visible-scope default; email={'yes' if email else 'none'}")
-    role = admin.get_role(user_id)
-    role = _resolve_role_with_env_admin(admin, user_id, role)
-    if admin.get(user_id):
-        email = admin.get(user_id).get("email", "") or email
-        name = admin.get(user_id).get("name", "") or name
+    # ── 身份闸：解析 email/role/mobile + 注入 CallerIdentity ───────────────
+    role, email, name, mobile = _resolve_identity(user_id)
+    set_current_caller(CallerIdentity(openid=user_id, email=email, mobile=mobile or None))
 
-    # ── 注入 CallerIdentity 到 contextvars（agent 路径和工具路径共用） ───
-    caller = CallerIdentity(openid=user_id, email=email, mobile=None)
-    set_current_caller(caller)
-
-    # ── 状态机：escape 关键词（用户在挂起状态时说「算了/换个」→ clear） ─
-    # 2026-06-18 Bug B 修复：用户改主意想查"我的预约"时，FSM 不应该把
-    # 整句话当 task_name 记录。先尝试 fast-path 查询（"我的预约" /
-    # "我的待审批" / "查可用车辆"），匹配则清状态 + 返回查询结果，
-    # 让用户能优雅退出 booking 流程。
+    # ── FSM 续答：用户在挂起状态时 ───────────────────────────────────────
     if car_state.get(user_id) is not None:
-        norm = text.strip().strip("「」『』[]\"'").lower()
-        if norm in _ESCAPE_PHRASES:
+        if intent.is_escape(text):
             car_state.clear(user_id)
             sender.send_text_as_card(chat_id, "已取消本次操作。")
             return
-        # 智能 escape：用户在挂起状态下说查询类语句 → 清状态 + 走 fast-path
-        query_intent = _match_query_intent_during_fsm(text)
-        if query_intent:
+        # 智能逃逸：挂起态下输入查询类语句 → 清状态走后续路由
+        if intent.match_query_intent_during_fsm(text):
             car_state.clear(user_id)
-            # 重新走 fast-path（in_fsm 已清 → 走正常 fast-path 分支）
-            fast = _try_fast_path(text, user_id, role)
+            fast = fast_path.try_fast_path(text, user_id, role)
             if fast is not None:
-                if fast.get("blocked"):
-                    sender.send_text_as_card(chat_id, fast["text"])
-                elif fast.get("card"):
-                    sender.send_card(chat_id, fast["card"])
-                else:
-                    sender.send_text_as_card(chat_id, fast.get("text") or _ERROR_REPLY)
+                _send_result(chat_id, fast)
                 return
-            # 2026-06-24 review fix：fast-path 没匹配（regex 漂移或权限不足）
-            # 时不能 silently fallthrough 到 LLM agent。给用户清晰提示并继续
-            # 走主 fast-path 分支（line 293），让 LLM 正常处理。
-            sender.send_text_as_card(
-                chat_id, "💡 没找到对应查询工具，正在帮你处理…")
+            # fast-path 未精确命中（如"看一下我的预约吧"含尾缀）→ 不发占位消息
+            # （会与后续 Tier-2/agent 回复重复），直接 fall through 让后面路由处理。
 
-    # ── Layer 0.5/0.6: Fast paths（直接调工具，<1s） ─────────────────
-    fast = _try_fast_path(text, user_id, role)
+    # ── Tier 1: 快速路径（精确查询短语）───────────────────────────────────
+    fast = fast_path.try_fast_path(text, user_id, role)
     if fast is not None:
-        if fast.get("blocked"):
-            sender.send_text_as_card(chat_id, fast["text"])
-        elif fast.get("card"):
-            sender.send_card(chat_id, fast["card"])
-        else:
-            sender.send_text_as_card(chat_id, fast.get("text") or _ERROR_REPLY)
+        _send_result(chat_id, fast)
         return
 
-    # ── FSM 入口：用户在挂起状态 OR 表达约车意图（spec §3.2） ─────────
-    from bot import car_booking_fsm
+    # ── Tier 1: FSM 入口（挂起中 OR 明确约车意图）─────────────────────────
     pending_state = car_state.get(user_id)
-    in_fsm = pending_state and pending_state.state not in ("", "START")
-
-    BOOKING_INTENT = ("我想约车", "我要约车", "帮我约车", "约车", "预约车",
-                      "帮我预约", "我想预约",
-                      # 2026-06-24 扩展：覆盖"我现在想约车/想约一辆"等口语化变体
-                      "我现在想约车", "我想约一辆", "我要约一辆",
-                      "想约车", "想约一辆车", "要约车", "约个车",
-                      "想预约车", "想预约一辆车")
-    norm = text.strip()
-    # "报编号"快捷路径：宽松校验（苏EAM0769 / AATI25SNV630 / TTVX25SPV009 格式）
-    is_vehicle_id = bool(re.match(
-        r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", norm))
-    # 2026-06-24：嵌入文本中的车辆编号也算 booking intent
-    # 用 word boundary 切分（避免把整句当编号），再用 _looks_like_vehicle_id 验证
-    # 2026-06-25 fix：必须含数字！纯中文（如"看下我的待审批记录" 9 字符）
-    # 会误匹配 [A-Za-z一-鿿]{4,19}，但 vehicle ID 实际一定含数字
-    _has_embedded_vehicle_id = False
-    for token in re.split(r"[\s,，.。!！?？;；]+", norm):
-        if (re.match(r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", token)
-                and any(c.isdigit() for c in token)):
-            _has_embedded_vehicle_id = True
-            break
-    # 2026-06-24 强化意图识别：用「intent 动词 + 0-12 字符 + 车辆词」regex
-    # 覆盖口语化变体（"我想要约一辆车"/"请问能帮我预约一下车辆吗"等）。
-    # 否定检测：前 8 字符内出现 不/没/别/无需/算了/取消/不要了 即视为非意图。
-    _intent_verb = "(约|预约|预定|book|schedule|預約|預定)"
-    _vehicle_word = "(车|车辆|vehicle|car|辆\\s*车|辆)"
-    _has_intent = bool(re.search(_intent_verb + r"[\\s\\S]{0,12}" + _vehicle_word, norm))
-    _has_negation = bool(re.search(r"不|没|别|无需|算了|取消|不要了", norm[:8]))
-    is_booking_intent = (
-        norm in BOOKING_INTENT
-        or norm.startswith(("我要约", "帮我约"))  # 兼容老的快捷路径
-        or (_has_intent and not _has_negation)
-        or _has_embedded_vehicle_id  # 文本里含车辆编号 → 用户在约这辆车
-        or _is_type_keyword(norm)
-        or is_vehicle_id
-    )
-
-    if in_fsm or is_booking_intent:
+    in_fsm = bool(pending_state and pending_state.state not in ("", "START"))
+    if in_fsm or intent.is_booking_intent(text):
         new_state, response = car_booking_fsm.advance(user_id, text)
-        # 渲染响应
-        if response.get("card"):
-            sender.send_card(chat_id, response["card"])
-        elif response.get("text") or response.get("buttons"):
-            # 2026-06-18 Bug A 修复：text + buttons 走 Card 2.0 渲染（可点击按钮），
-            # 之前拼成 "· 文本" 纯文本行（飞书看不到点击按钮）。
-            # 复用 card_action_handler._render_fsm_response 的逻辑。
-            # 2026-06-24 review fix：去掉残留的 `text_lines` 引用（之前那行是 Bug A
-            # 修过的拼接死代码，会 NameError）。
-            from bot.card_action_handler import _render_fsm_response
-            _toast, _card = _render_fsm_response(response)
-            if _card is not None:
-                sender.send_card(chat_id, _card)
-            else:
-                sender.send_text_as_card(chat_id, response.get("text", ""))
-        else:
-            sender.send_text_as_card(chat_id, _ERROR_REPLY)
+        _send_fsm_response(chat_id, response)
         return
 
-    # ── Identity query / admin command ────────────────────────────────
-    identity_response = _handle_identity_query(text, user_id)
+    # ── Tier 1: 身份查询 / 管理员命令 ────────────────────────────────────
+    identity_response = replies.handle_identity_query(text, user_id)
     if identity_response:
         sender.send_text_as_card(chat_id, identity_response)
         return
-
-    admin_response = _handle_admin_command(text, user_id)
+    admin_response = replies.handle_admin_command(text, user_id)
     if admin_response:
         sender.send_text_as_card(chat_id, admin_response)
         return
 
     if role == 0:
-        sender.send_text_as_card(chat_id,
-            "无法识别您的身份（未获取到 open_id），请在飞书私聊中直接发消息后重试。")
+        sender.send_text_as_card(chat_id, _STRANGER_REPLY)
         return
 
-    # ── Agent 路径 ────────────────────────────────────────────────────
+    # ── Tier 2: LLM 意图路由器（理解措辞多样/表达有问题的消息）─────────────
+    if _route_with_llm(chat_id, user_id, role, text):
+        return
+
+    # ── Agent 路径（兜底，最大自由度）────────────────────────────────────
+    _run_agent(chat_id, user_id, role, name, text, msg.message_id)
+
+
+def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
+    """auto-register + 角色解析 + email/name/mobile 回填。返回 (role, email, name, mobile)。
+
+    手机号是第二识别符（邮箱为主、上游 fmp 仍按 emailAddress 鉴权）。mobile 解析自
+    identity_map（identity.mobile_of）并回写 identity_admin，随 CallerIdentity 透传。
+    """
+    admin = get_identity_admin()
+    email = identity.email_of(user_id)
+    name = identity.name_of(user_id)
+    mobile = identity.mobile_of(user_id)
+    if user_id:
+        admin.auto_register(user_id, email=email, name=name, mobile=mobile)
+        existing = admin.get(user_id) or {}
+        # email/name/mobile 任一有新值且与档案不一致 → 回写（mobile 也作为识别符落档）
+        if (email and existing.get("email") != email) or \
+           (mobile and existing.get("mobile") != mobile):
+            admin.update_profile(
+                user_id,
+                email=email or existing.get("email", ""),
+                name=name or existing.get("name", ""),
+                mobile=mobile or existing.get("mobile", ""),
+                operator="auto_email_sync",
+            )
+        if admin.get_role(user_id) == 0:
+            admin.set_role(user_id, 1, operator="auto_in_scope",
+                           note=f"in-visible-scope default; email={'yes' if email else 'none'}")
+    role = admin.get_role(user_id)
+    role = replies.resolve_role_with_env_admin(admin, user_id, role)
+    rec = admin.get(user_id)
+    if rec:
+        email = rec.get("email", "") or email
+        name = rec.get("name", "") or name
+        mobile = rec.get("mobile", "") or mobile
+    return role, email, name, mobile
+
+
+def _route_with_llm(chat_id: str, user_id: str, role: int, text: str) -> bool:
+    """Tier-2：LLM 结构化分类 + 分发。返回 True 表示已处理（调用方应 return）。
+
+    fail-open：分类器异常返回 unknown；低置信 / cancel/return/approve / unknown
+    一律落到 agent（返回 False）。
+    """
+    try:
+        decision = intent_router.classify(text)
+    except Exception:
+        log.warning("intent_router raised — falling through to agent", exc_info=True)
+        return False
+
+    if not decision.is_confident:
+        return False  # → agent
+
+    if decision.intent == "book":
+        _new_state, response = car_booking_fsm.start_booking(user_id, decision.slots)
+        _send_fsm_response(chat_id, response)
+        return True
+
+    _QUERY_TOOL = {
+        "query_vehicles": "fetch_available_vehicles",
+        "query_reservations": "fetch_user_reservation",
+        "query_approvals": "fetch_user_approval",
+    }
+    tool = _QUERY_TOOL.get(decision.intent)
+    if tool:
+        result = fast_path.run_tool(tool, user_id, role)
+        if result is not None:
+            _send_result(chat_id, result)
+            return True
+        return False  # 权限不足/工具缺失 → agent 兜底
+
+    if decision.intent == "identity":
+        sender.send_text_as_card(chat_id, replies.identity_reply(user_id))
+        return True
+
+    if decision.intent == "chitchat":
+        sender.send_text_as_card(chat_id, intent_filter.REDIRECT_MESSAGE)
+        return True
+
+    if decision.intent in ("cancel", "return", "approve"):
+        result = fast_path.run_mutation(decision.intent, decision.slots, user_id, role)
+        if result is not None:
+            _send_result(chat_id, result)
+            return True
+        return False  # 缺识别符/权限不足 → agent 追问
+
+    # unknown → agent（自由推理）
+    return False
+
+
+def _run_agent(chat_id: str, user_id: str, role: int, name: str,
+               text: str, message_id: str) -> None:
+    """完整 agent 路径：AIAgent.chat → OCL pipeline → 卡片 + 后处理。"""
     session_id = f"feishu_{user_id}"
     start = time.monotonic()
     captured: list[dict] = []
     try:
-        t0 = time.monotonic()
         agent = agent_pool.get_or_create(user_id)
-        log.info("trace[agent_pool.get_or_create] took=%.2fs", time.monotonic() - t0)
-        # contextvars 不会跨线程自动传播 —— 必须 copy_context。
-        ctx = contextvars.copy_context()
+        ctx = contextvars.copy_context()  # contextvars 不跨线程自动传播
         tool_capture.clear(session_id)
-        agent_input = _identity_preamble(user_id, role, name) + text
-        t1 = time.monotonic()
+        agent_input = replies.identity_preamble(user_id, role, name) + text
         future = _executor.submit(ctx.run, agent.chat, agent_input)
-        log.info("trace[executor.submit] took=%.2fs", time.monotonic() - t1)
-        t2 = time.monotonic()
         response: str = future.result(timeout=settings.AGENT_TIMEOUT_SECONDS)
-        log.info("trace[future.result] took=%.2fs", time.monotonic() - t2)
         captured = tool_capture.read(session_id)
         latency = time.monotonic() - start
         metrics.record("llm_latency_seconds", latency)
         metrics.inc("messages_processed")
-        log.info("processed message_id=%s latency=%.2fs", msg.message_id, latency)
+        log.info("processed message_id=%s latency=%.2fs", message_id, latency)
     except FuturesTimeout:
-        log.error("Agent timeout for user_id=%s message_id=%s", user_id, msg.message_id)
+        log.error("Agent timeout for user_id=%s message_id=%s", user_id, message_id)
         metrics.inc("errors_timeout")
         response = _TIMEOUT_REPLY
     except Exception:
-        log.exception("Agent error for user_id=%s message_id=%s", user_id, msg.message_id)
+        log.exception("Agent error for user_id=%s message_id=%s", user_id, message_id)
         metrics.inc("errors_agent")
         response = _ERROR_REPLY
     finally:
         set_current_caller(CallerIdentity())
         tool_capture.clear(session_id)
 
-    # ── OCL pipeline ──────────────────────────────────────────────────
     ocl_result = ocl_apply(response or "", user_id, captured=captured)
     if ocl_result.blocked:
         metrics.inc("errors_ocl_blocked")
-
     if ocl_result.card is not None and not ocl_result.blocked:
         try:
             sender.send_card(chat_id, ocl_result.card)
@@ -437,378 +284,83 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     else:
         sender.send_text_as_card(chat_id, ocl_result.text or _ERROR_REPLY)
 
-    # ── 状态机持久化：_dry_run 完成后写入 car_state ───────────────────
-    for entry in reversed(captured):
-        if entry.get("tool") == "_dry_run_vehicle_reservation":
-            res = entry.get("result") or {}
-            if isinstance(res, dict) and res.get("dry_run") and not res.get("missing_fields"):
-                args = res.get("args") or {}
-                car_state.save(
-                    user_id,
-                    intent="booking",
-                    vehicle_no=args.get("vehicle_no", ""),
-                    vehicle_type=args.get("vehicle_type", ""),
-                    platform=args.get("platform", ""),
-                    license_plate=args.get("license_plate", ""),
-                    start_time=args.get("start_time", ""),
-                    end_time=args.get("end_time", ""),
-                    task_name=args.get("task_name", ""),
-                    location=args.get("location", ""),
-                    remark=args.get("remark", ""),
-                    vin=args.get("vin", ""),
-                )
-                break
-
-    # ── 审批完成通知申请人：扫描 captured 里的 approval_vehicle_reservation ──
-    # 调度员审批 → applicant DM 是车辆域头条功能；approval_vehicle_reservation
-    # 成功完成时通过 reservation_store 反查申请人 open_id 异步发飞书通知。
+    # 状态机持久化：_dry_run 完成后写入 car_state（LLM agent 路径的 booking）
+    _persist_dry_run_state(user_id, captured)
+    # 审批完成通知申请人
     _notify_applicants_from_captured(captured)
 
 
+def _persist_dry_run_state(user_id: str, captured: list) -> None:
+    """扫描 captured，最后一次成功 _dry_run_vehicle_reservation → 存 car_state。"""
+    for entry in reversed(captured):
+        if entry.get("tool") != "_dry_run_vehicle_reservation":
+            continue
+        res = entry.get("result") or {}
+        if isinstance(res, dict) and res.get("dry_run") and not res.get("missing_fields"):
+            args = res.get("args") or {}
+            car_state.save(
+                user_id, intent="booking",
+                vehicle_no=args.get("vehicle_no", ""),
+                vehicle_type=args.get("vehicle_type", ""),
+                platform=args.get("platform", ""),
+                license_plate=args.get("license_plate", ""),
+                start_time=args.get("start_time", ""),
+                end_time=args.get("end_time", ""),
+                task_name=args.get("task_name", ""),
+                location=args.get("location", ""),
+                remark=args.get("remark", ""),
+                vin=args.get("vin", ""),
+            )
+            break
+
+
 def _notify_applicants_from_captured(captured: list) -> None:
-    """扫描本轮 captured，找到 approval_vehicle_reservation 成功结果，
-    给对应申请人发 DM（异步、fire-and-forget）。"""
+    """扫描本轮 captured，找 approval_vehicle_reservation 成功结果 → DM 申请人。"""
     from car_tools import notify_applicant as _notify_applicant
     for entry in captured:
         if entry.get("tool") != "approval_vehicle_reservation":
             continue
         res = entry.get("result")
-        if not isinstance(res, dict):
+        if not isinstance(res, dict) or "error" in res:
             continue
-        if "error" in res:
-            continue
-        # 兼容 {"data": {...}} 包装；与 normalizers 输出对齐
         result_dict = res.get("data") if isinstance(res.get("data"), dict) else res
         if not isinstance(result_dict, dict) or "approved" not in result_dict:
             continue
         rid = result_dict.get("reservation_id") or result_dict.get("reservationId") or ""
-        vehicle_no = result_dict.get("vehicle_no", "")
-        start_time = result_dict.get("start_time", "")
         try:
             _notify_applicant.submit_approval_to_applicant(
-                result_dict,
-                reservation_id=rid,
-                vehicle_no=vehicle_no,
-                start_time=start_time,
+                result_dict, reservation_id=rid,
+                vehicle_no=result_dict.get("vehicle_no", ""),
+                start_time=result_dict.get("start_time", ""),
             )
         except Exception:
             log.exception("notify_applicant_dispatch_failed rid=%s", rid)
 
 
-def _commit_confirmed_booking(chat_id: str, user_id: str) -> None:
-    """用户在挂起状态回复「确认」→ 调 _commit_vehicle_reservation。"""
-    pending = car_state.get(user_id)
-    if not pending or pending.intent != "booking":
+# ── 渲染辅助 ──────────────────────────────────────────────────────────────
+def _send_result(chat_id: str, result: dict) -> None:
+    """fast_path 返回的 {"blocked"|"card"|"text"} → 发送。"""
+    if result.get("blocked"):
+        sender.send_text_as_card(chat_id, result["text"])
+    elif result.get("card"):
+        sender.send_card(chat_id, result["card"])
+    else:
+        sender.send_text_as_card(chat_id, result.get("text") or _ERROR_REPLY)
+
+
+def _send_fsm_response(chat_id: str, response: dict) -> None:
+    """FSM / start_booking 返回的 response → 发送（card 优先，text+buttons 拼卡）。"""
+    if response.get("card"):
+        sender.send_card(chat_id, response["card"])
+    elif response.get("text") or response.get("buttons"):
+        from bot.card_action_handler import _render_fsm_response
+        _toast, _card = _render_fsm_response(response)
+        if _card is not None:
+            sender.send_card(chat_id, _card)
+        else:
+            sender.send_text_as_card(chat_id, response.get("text", ""))
+    else:
         sender.send_text_as_card(chat_id, _ERROR_REPLY)
-        return
-    car_state.clear(user_id)
-
-    args = {
-        "vehicleNo": pending.vehicle_no,
-        "vehicleType": pending.vehicle_type,
-        "platform": pending.platform,
-        "licensePlate": pending.license_plate,
-        "startTime": pending.start_time,
-        "endTime": pending.end_time,
-        "taskName": pending.task_name,
-        "location": pending.location,
-        "remark": pending.remark,
-        "vin": pending.vin,
-    }
-    args = {k: v for k, v in args.items() if v}
-
-    # 权限门控由 L1 (hermes pre_tool_call 钩子) + L2 (guarded() 包裹) 负责；
-    # 这里不再做第三重硬编码 check（与 card_action_handler._handle_confirm_booking 一致）。
-
-    set_current_caller(CallerIdentity(openid=user_id, email=identity.email_of(user_id)))
-    try:
-        raw = car_handlers._commit_single_vehicle_reservation(args)
-        try:
-            parsed = json.loads(raw) if isinstance(raw, str) else raw
-        except (json.JSONDecodeError, ValueError):
-            parsed = {"error": raw}
-
-        if isinstance(parsed, dict) and "error" in parsed:
-            sender.send_card(chat_id, car_card_builder.build_fail_card(
-                parsed["error"], context="提交预约"))
-            return
-
-        # 解析 ReservationResult 并触发调度员通知
-        from car_tools import notify_dispatchers
-        result_dict = parsed.get("data") if isinstance(parsed, dict) and "data" in parsed else parsed
-        if not isinstance(result_dict, dict):
-            sender.send_card(chat_id, car_card_builder.build_success_card({"args": args}))
-            return
-
-        sender.send_card(chat_id, car_card_builder.build_success_card(result_dict))
-        notify_dispatchers.submit_reservation_dispatchers(result_dict)
-
-        # 与 card_action_handler 路径保持一致：持久化 (reservation_id → applicant_open_id)
-        # 映射，审批通过时由 notify_applicant 反查。
-        from bot import reservation_store
-        rid = result_dict.get("reservation_id") or result_dict.get("reservationId") or ""
-        key = rid or f"car|{result_dict.get('vehicle_no','')}|{result_dict.get('start_time','')}"
-        reservation_store.save(
-            key, user_id, identity.email_of(user_id),
-            result_dict.get("vehicle_no", ""),
-            result_dict.get("start_time", ""),
-            result_dict.get("end_time", ""),
-            result_dict.get("task_name", ""),
-        )
-    finally:
-        set_current_caller(CallerIdentity())
-
-
-def _match_simple_intent(text: str) -> str:
-    for pattern, reply in _SIMPLE_REPLIES:
-        if pattern.search(text):
-            return reply
-    return ""
-
-
-# ── Layer 0.5 / 0.6 Fast path（车辆业务） ─────────────────────────────────
-
-# 类型/平台关键字白名单（fast-path 用，避免误匹配"我想约车"等通用短语）
-_TYPE_KEYWORDS = (
-    # 车辆类型（车型）
-    "DM2", "CT1", "BM2", "CM0", "大F车", "小F车", "中F车",
-    # 平台（芯片）
-    "Xavier", "ADCU", "Orin", "Thor",
-    # 英文拼写
-    "大Fcar",
-)
-
-
-# 2026-06-18 Bug B 修复：用户在 FSM 挂起状态下输入查询类语句（想改主意
-# 查"我的预约"）时，应该清 FSM 状态走 fast-path，而不是把整句当 task_name。
-# 2026-06-24 review fix：不再单独维护正则集合——复用 _FAST_PATH_PATTERNS
-# 同一份 pattern（single source of truth），加 .search() 匹配而非 .match()。
-# 新加任何 fast-path 查询工具时，自动在 in-fsm escape 也生效。
-_FSM_ESCAPE_EXEMPT = ("fetch_available_vehicles",)  # 车辆查询不 escape（用户可能想进 booking）
-
-
-def _match_query_intent_during_fsm(text: str) -> bool:
-    """用户在 FSM 挂起状态时输入查询类语句 → 返回 True 让 handler 清状态走 fast-path。
-    复用 _FAST_PATH_PATTERNS 任一 pattern（除 fetch_available_vehicles 外）；
-    新加查询工具自动同步 escape 行为。
-    """
-    norm = (text or "").strip()
-    if not norm:
-        return False
-    for pattern, tool_name, _args_fn in _FAST_PATH_PATTERNS:
-        if tool_name in _FSM_ESCAPE_EXEMPT:
-            continue
-        if pattern.search(norm):
-            return True
-    return False
-
-
-def _empty_args(m) -> dict:
-    return {}
-
-
-def _args_with_type(m) -> dict:
-    """从 fast-path 命中里抽 vehicleType。"""
-    if m.lastindex and m.group(1):
-        return {"vehicleType": m.group(1).strip()}
-    return {}
-
-
-def _args_with_platform(m) -> dict:
-    """从 fast-path 命中里抽 platform（芯片）。"""
-    if m.lastindex and m.group(1):
-        return {"platform": m.group(1).strip()}
-    return {}
-
-
-def _is_type_keyword(s: str) -> bool:
-    """判断字符串是否是已知车型/平台关键字。"""
-    return s.strip() in _TYPE_KEYWORDS
-
-
-_FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
-    # ── fetch_available_vehicles ──
-    (re.compile(r'^(查询|查看|看看|有什么|列出|看|查)(\s*(所有|可用))?\s*(车辆|车)(\s*(列表|号))?[\s!！。.]*$'),
-     "fetch_available_vehicles", _empty_args),
-    (re.compile(r'^车辆(\s*(列表))?[\s!！。.]*$'),
-     "fetch_available_vehicles", _empty_args),
-    # 带车型/平台过滤的查询（用白名单匹配，避免误匹配通用短语）
-    # 模式：现在 DM2 有什么车可以约 / 大Fcar 有什么车 / Xavier 平台的车
-    (re.compile(
-        r'^(?:现在|查|看|查询)?\s*(' + "|".join(re.escape(k) for k in _TYPE_KEYWORDS) + r')\s*'
-        r'(?:有(?:什么|哪些))?\s*车\s*(?:可以)?\s*(?:约|查询|看)?\s*[\s!！。.]*$'),
-     "fetch_available_vehicles", _args_with_type),
-
-    # ── fetch_user_reservation ──
-    # 2026-06-18 修：加 "一下/下/看看" 等口语化前缀，避免"查看一下我的预约"被错路由
-    # 到 LLM agent 然后被 booking 工具截走（用户截图反馈 BUG #1）
-    # 2026-06-25 扩展：覆盖"看一下/查一下/看看我的"等
-    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下|看一下|查一下|看看我的)?\s*(一下\s*)?我的\s*(预约记录|预约|所有预约|预约历史|约车记录)[\s!！。.]*$'),
-     "fetch_user_reservation", _empty_args),
-
-    # ── fetch_user_approval ──
-    # 2026-06-25 扩展：覆盖"看下/看一下/帮我看/看看/查一下"等口语化前缀
-    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下|看一下|查一下|看看我的)?\s*(一下\s*)?我的\s*(待审批列表|待审批|待我审批|审批列表|审批记录|待审批记录|审批)[\s!！。.]*$'),
-     "fetch_user_approval", _empty_args),
-]
-
-
-def _fetch_vehicles_recommendations(car_handlers_module, user_id: str) -> list:
-    """2026-06-18 查可用车辆空态推荐：调用 fetch_available_vehicles（无 filter）拿车组全量。
-
-    给 handler._try_fast_path「查可用车辆」无车时复用。
-    """
-    try:
-        raw = car_handlers_module.fetch_available_vehicles({})
-        if isinstance(raw, str):
-            parsed = json.loads(raw) if raw else {}
-        else:
-            parsed = raw
-        if isinstance(parsed, dict):
-            items = (parsed.get("items") or parsed.get("vehicles")
-                     or parsed.get("data") or [])
-        elif isinstance(parsed, list):
-            items = parsed
-        else:
-            items = []
-        return [v for v in items if isinstance(v, dict)]
-    except Exception:
-        return []
-
-
-def _try_fast_path(text: str, user_id: str, role: int) -> Optional[dict]:
-    norm = text.strip()
-    if not norm:
-        return None
-
-    from ocl.permission import TOOL_MIN_ROLE
-
-    for pattern, tool_name, args_fn in _FAST_PATH_PATTERNS:
-        m = pattern.match(norm)
-        if not m:
-            continue
-
-        if TOOL_MIN_ROLE.get(tool_name, 99) > role:
-            return None
-
-        set_current_caller(CallerIdentity(openid=user_id, email=identity.email_of(user_id)))
-        try:
-            handler = getattr(car_handlers, tool_name, None)
-            if handler is None:
-                return None
-
-            args = args_fn(m)
-            t0 = time.monotonic()
-            try:
-                raw = handler(args)
-            except Exception:
-                log.exception("fast_path tool_failed tool=%s user=%s", tool_name, user_id)
-                return None
-            latency_ms = (time.monotonic() - t0) * 1000
-            metrics.inc("fast_path_hits")
-            log.info("fast_path hit tool=%s user=%s latency=%.0fms",
-                     tool_name, user_id, latency_ms)
-
-            try:
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-            except (json.JSONDecodeError, ValueError):
-                parsed = {}
-
-            if not isinstance(parsed, (dict, list)):
-                parsed = {}
-
-            if isinstance(parsed, dict) and "error" in parsed:
-                return {"text": f"❌ 查询失败：{parsed['error']}", "blocked": False, "card": None}
-
-            # 业务专用卡片
-            if tool_name == "fetch_available_vehicles":
-                # parsed 可能是 list[dict]（vehicle 列表）或 dict（错误）
-                vehicles = parsed if isinstance(parsed, list) else []
-                # 2026-06-18 优化：用户查可用车辆时如果为空，推荐同车组可用车型。
-                # 用 fetch_available_vehicles 三级 fallback（与 FSM 同源）。
-                recommendations = []
-                if not vehicles:
-                    rec = _fetch_vehicles_recommendations(car_handlers, user_id)
-                    recommendations = rec
-                # 缓存到 car_state（供"约第N个" / "约XX" 文本选择路径反查）
-                car_state.save(
-                    user_id,
-                    intent="",
-                    last_vehicles=vehicles,
-                    last_query={},
-                )
-                # 把用户的过滤条件（如 vehicleType / platform）拼成 query_label 显示在卡片
-                ql_parts = []
-                if (args.get("vehicleType") or args.get("vehicle_type")):
-                    ql_parts.append(str(args.get("vehicleType") or args.get("vehicle_type")))
-                if args.get("platform"):
-                    ql_parts.append(f"{args['platform']}芯片")
-                query_label = " · ".join(ql_parts) if ql_parts else None
-                if vehicles:
-                    card = car_card_builder.build_vehicles_card(
-                        vehicles, query_label=query_label)
-                    return {"card": card, "text": None, "blocked": False}
-                if recommendations:
-                    # 复用 FSM 的 recommendation 卡 builder（保持 UX 一致）
-                    from bot.car_booking_fsm import _build_recommendation_card
-                    fake_pending = type("_P", (), {
-                        "vehicle_type_detail": args.get("vehicleTypeDetail") or args.get("vehicle_type_detail") or "",
-                        "vehicle_type": args.get("vehicleType") or args.get("vehicle_type") or "",
-                        "chip": args.get("platform") or "",
-                    })()
-                    card = _build_recommendation_card(recommendations, fake_pending)
-                    return {"card": card, "text": None, "blocked": False}
-                # 真无车 — 用 card_builder 默认空态
-                card = car_card_builder.build_vehicles_card(
-                    vehicles, query_label=query_label)
-                return {"card": card, "text": None, "blocked": False}
-            if tool_name == "fetch_user_reservation":
-                n = len(parsed) if isinstance(parsed, list) else 0
-                card = _build_records_card(parsed, title=f"📋 我的预约（共 {n} 条）")
-                return {"card": card, "text": None, "blocked": False}
-            if tool_name == "fetch_user_approval":
-                n = len(parsed) if isinstance(parsed, list) else 0
-                card = _build_records_card(parsed, title=f"📋 我的待审批（共 {n} 条）")
-                return {"card": card, "text": None, "blocked": False}
-
-            return {"text": "📋 查询成功。", "blocked": False, "card": None}
-        finally:
-            # 防止 caller 跨消息泄漏：fast path 不会走到 handler.py 主 finally
-            set_current_caller(CallerIdentity())
-    return None
-
-
-def _build_records_card(records: list, *, title: str) -> dict:
-    if not records:
-        return {"config": {"wide_screen_mode": True},
-                "elements": [{"tag": "div",
-                              "text": {"tag": "lark_md",
-                                       "content": f"{title}\n\n（暂无记录）"}}]}
-    lines = ["| 车辆 | 平台 | 时间 | 任务 | 状态 |",
-             "|------|------|------|------|------|"]
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        status = r.get("status", "")
-        if status in ("待审批", "已批准", "已驳回", "已取消", "已归还"):
-            badge_map = {
-                "待审批": "🟡待审批", "已批准": "🟢已批准", "已驳回": "🔴已驳回",
-                "已取消": "⚪已取消", "已归还": "✅已归还",
-            }
-            status = badge_map.get(status, status)
-        vno = r.get("vehicle_no", "")
-        vno_short = vno[-6:] if vno and len(vno) >= 6 else vno  # 显示后 6 位
-        lines.append(
-            f"| `{vno_short}` "
-            f"| {r.get('platform') or '-'} "
-            f"| {r.get('start_time','')} ~ {r.get('end_time','')} "
-            f"| {r.get('task_name') or '-'} "
-            f"| {status} |"
-        )
-    return {"config": {"wide_screen_mode": True},
-            "elements": [{"tag": "div",
-                          "text": {"tag": "lark_md",
-                                   "content": f"{title}\n\n" + "\n".join(lines)}}]}
 
 
 def _extract_text(msg) -> str:

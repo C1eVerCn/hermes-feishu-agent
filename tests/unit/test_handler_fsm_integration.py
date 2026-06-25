@@ -174,48 +174,6 @@ def test_direct_by_id_flow(setup):
     assert pending.vehicle_no == "SNV018"
 
 
-# ── 意图识别覆盖（2026-06-24 强化） ─────────────────────────────────
+# 约车意图识别用例（30 例）已迁移到 tests/unit/test_intent.py，
+# 直接测 bot.intent.is_booking_intent（单一事实源），不再靠读 handler 源码 + 重实现正则。
 
-def test_booking_intent_recognition_regex(setup):
-    """2026-06-24 强化意图识别：覆盖口语化变体（regex intent_verb + vehicle_word）
-    + 否定检测（前 8 字符内含 不/没/别/无需/算了/取消/不要了 视为非意图）。
-
-    直接测试 handler 内部使用的 is_booking_intent 计算（避免 LLM 路径慢），
-    通过 is_booking_intent 标志 + spy.cards 内容判断。
-    """
-    import re
-    from bot import handler as h
-    src = open(h.__file__).read()
-    m = re.search(r'BOOKING_INTENT = \((.*?)\)', src, re.DOTALL)
-    BI = eval(m.group(0).replace('BOOKING_INTENT = ', ''))
-    START = ('我要约', '帮我约')
-    intent_verb = r'(约|预约|预定|book|schedule|預約|預定)'
-    vehicle_word = r'(车|车辆|vehicle|car|辆\s*车|辆)'
-
-    def is_bi(norm):
-        n = norm.strip()
-        return (n in BI
-                or n.startswith(START)
-                or (bool(re.search(intent_verb + r'[\s\S]{0,12}' + vehicle_word, n))
-                    and not bool(re.search(r'不|没|别|无需|算了|取消|不要了', n[:8]))))
-
-    cases = [
-        # 标准变体
-        ("我想约车", True), ("我要约车", True), ("我想要约一辆车", True),
-        ("帮我约一下车", True), ("想预约车辆", True),
-        ("请问能帮我预约一下车辆吗", True),
-        ("嗯我想约车", True), ("那个我想约车", True),
-        ("可以帮我约车吗", True), ("我现在想约个车", True),
-        ("帮我约一辆", True), ("我想预定车", True),
-        # 否定
-        ("我不想约车", False), ("别约车了", False), ("取消预约", False),
-        ("不要约车", False), ("算了不约了", False),
-        # 不相关
-        ("随便看看", False), ("车有问题", False),
-        ("一辆车多少钱", False), ("我要叫车", False),
-        ("帮我叫车", False), ("一辆车坏了", False),
-        ("车要保养", False),
-    ]
-    failed = [(t, e, g) for t, e in cases
-              if (g := is_bi(t)) != e]
-    assert not failed, f"Intent recognition mismatches: {failed}"
