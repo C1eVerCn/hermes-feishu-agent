@@ -323,12 +323,14 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", norm))
     # 2026-06-24：嵌入文本中的车辆编号也算 booking intent
     # 用 word boundary 切分（避免把整句当编号），再用 _looks_like_vehicle_id 验证
+    # 2026-06-25 fix：必须含数字！纯中文（如"看下我的待审批记录" 9 字符）
+    # 会误匹配 [A-Za-z一-鿿]{4,19}，但 vehicle ID 实际一定含数字
     _has_embedded_vehicle_id = False
     for token in re.split(r"[\s,，.。!！?？;；]+", norm):
-        if re.match(r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", token):
-            if any(c.isdigit() for c in token):
-                _has_embedded_vehicle_id = True
-                break
+        if (re.match(r"^[A-Za-z一-鿿][A-Za-z0-9一-鿿]{4,19}$", token)
+                and any(c.isdigit() for c in token)):
+            _has_embedded_vehicle_id = True
+            break
     # 2026-06-24 强化意图识别：用「intent 动词 + 0-12 字符 + 车辆词」regex
     # 覆盖口语化变体（"我想要约一辆车"/"请问能帮我预约一下车辆吗"等）。
     # 否定检测：前 8 字符内出现 不/没/别/无需/算了/取消/不要了 即视为非意图。
@@ -636,11 +638,13 @@ _FAST_PATH_PATTERNS: list[tuple[re.Pattern, str, "callable"]] = [
     # ── fetch_user_reservation ──
     # 2026-06-18 修：加 "一下/下/看看" 等口语化前缀，避免"查看一下我的预约"被错路由
     # 到 LLM agent 然后被 booking 工具截走（用户截图反馈 BUG #1）
-    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下|查一下|看看我的)?\s*(一下\s*)?我的\s*(预约记录|预约|所有预约|预约历史|约车记录)[\s!！。.]*$'),
+    # 2026-06-25 扩展：覆盖"看一下/查一下/看看我的"等
+    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下|看一下|查一下|看看我的)?\s*(一下\s*)?我的\s*(预约记录|预约|所有预约|预约历史|约车记录)[\s!！。.]*$'),
      "fetch_user_reservation", _empty_args),
 
     # ── fetch_user_approval ──
-    (re.compile(r'^(查询|查看|查|看看|帮我查|帮我看)?\s*(我的)?\s*(待审批列表|待审批|待我审批|审批列表|审批记录)[\s!！。.]*$'),
+    # 2026-06-25 扩展：覆盖"看下/看一下/帮我看/看看/查一下"等口语化前缀
+    (re.compile(r'^(查询|查看|查一下|查|看看|看下|帮我查|帮我看|查询一下|看一下|查一下|看看我的)?\s*(一下\s*)?我的\s*(待审批列表|待审批|待我审批|审批列表|审批记录|待审批记录|审批)[\s!！。.]*$'),
      "fetch_user_approval", _empty_args),
 ]
 
@@ -788,8 +792,10 @@ def _build_records_card(records: list, *, title: str) -> dict:
                 "已取消": "⚪已取消", "已归还": "✅已归还",
             }
             status = badge_map.get(status, status)
+        vno = r.get("vehicle_no", "")
+        vno_short = vno[-6:] if vno and len(vno) >= 6 else vno  # 显示后 6 位
         lines.append(
-            f"| `{r.get('vehicle_no','')}` "
+            f"| `{vno_short}` "
             f"| {r.get('platform') or '-'} "
             f"| {r.get('start_time','')} ~ {r.get('end_time','')} "
             f"| {r.get('task_name') or '-'} "
