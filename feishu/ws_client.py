@@ -78,21 +78,29 @@ def _extract_card_action(data: P2CardActionTrigger):
         # (lark_oapi/event/callback/model/p2_card_action_trigger.py:38-66):
         #   option:     Optional[str]            ← 单选 select_static 选中 key
         #   options:    Optional[List[str]]      ← 多选 select_static 选中 keys
-        #   form_value: Optional[Dict[str, Any]] ← Card 2.0 form submit（input/textarea 字段）
+        #   form_value: Optional[Dict[str, Any]] ← Card 2.0 form aggregate submit
+        #   input_value: Optional[str]          ← Card 2.0 input/textarea submit 文本
         #   tag:        Optional[str]            ← 触发元素 tag（"button" / "form" / "select_static"）
-        # 优先级：form_value 第一个 string > option > options[0]
+        # 优先级：input_value (str) > form_value 第一个 string > option > options[0]
+        # 2026-06-25 fix：input_value 是 input 元素的提交文本（单字段），form_value 是
+        # form 聚合提交（Dict）。单字段 input 提交时 input_value 有值但 form_value 为 None。
         # 2026-06-24 review fix：只对 tag 明确是 form/select 的 action 注入 value；
         # 普通 button (tag='button' 无 value 字段是合法的，比如 cancel_flow) 不动，
         # 避免被 option/form_value 污染成无效文本。
         if action_tag in ("form", "select_static"):
-            # 1) form_value Dict：取第一个 string 值（如 {"task_input": "MFF"} → "MFF"）
-            form_value = getattr(action, "form_value", None)
-            if isinstance(form_value, dict) and form_value:
-                for v in form_value.values():
-                    if isinstance(v, str) and v:
-                        value = {**value, "value": v}
-                        break
-            # 2) 还没 value → 退回 select_static option 路径
+            # 1) input_value str：input 元素的提交文本（最高优先级）
+            input_value = getattr(action, "input_value", None)
+            if isinstance(input_value, str) and input_value:
+                value = {**value, "value": input_value}
+            # 2) form_value Dict：取第一个 string 值（如 {"task_input": "MFF"} → "MFF"）
+            if not value.get("value"):
+                form_value = getattr(action, "form_value", None)
+                if isinstance(form_value, dict) and form_value:
+                    for v in form_value.values():
+                        if isinstance(v, str) and v:
+                            value = {**value, "value": v}
+                            break
+            # 3) 还没 value → 退回 select_static option 路径
             if not value.get("value"):
                 def _first_str(*names):
                     for n in names:
