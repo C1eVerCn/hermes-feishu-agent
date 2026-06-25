@@ -40,6 +40,7 @@ from bot import intent_router
 from bot import replies
 from bot import fast_path
 from bot import car_booking_fsm
+from bot import return_fsm
 from infra.metrics import metrics
 from ocl.pipeline import apply as ocl_apply
 from ocl.tool_guard import set_current_caller, CallerIdentity
@@ -124,11 +125,23 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
         _send_result(chat_id, fast)
         return
 
-    # ── Tier 1: FSM 入口（挂起中 OR 明确约车意图）─────────────────────────
+    # ── Tier 1: FSM 入口（挂起中 OR 明确约车意图 OR 还车意图）─────────────
     pending_state = car_state.get(user_id)
+    # 还车 FSM 续答：挂起且 intent=return 且处于 RET_* 状态
+    if (pending_state and pending_state.intent == "return"
+            and return_fsm.is_return_state(pending_state.state)):
+        _new_state, response = return_fsm.advance(user_id, text)
+        _send_fsm_response(chat_id, response)
+        return
     in_fsm = bool(pending_state and pending_state.state not in ("", "START"))
     if in_fsm or intent.is_booking_intent(text):
         new_state, response = car_booking_fsm.advance(user_id, text)
+        _send_fsm_response(chat_id, response)
+        return
+    # 还车意图（Tier-1 确定性，Minimax 不可用时也能进还车流程）
+    if intent.is_return_intent(text):
+        vno = intent.extract_embedded_vehicle_id(text)
+        _new_state, response = return_fsm.start(user_id, {"vehicle_no": vno} if vno else {})
         _send_fsm_response(chat_id, response)
         return
 
@@ -251,9 +264,10 @@ def _route_with_llm(chat_id: str, user_id: str, role: int, text: str) -> bool:
         return False  # 缺识别符/权限不足 → agent
 
     if decision.intent == "return":
-        # 还车需 5 个必填字段（还车地点/钥匙位置/变更模块/车辆状态/状态描述），
-        # 一键确认不足以收集 → 交完整 agent 对话式收集（其有 return_vehicle 工具）。
-        return False
+        # 还车 → 进还车表单 FSM（一步步收集 5 个必填字段 + 二次确认）。
+        _new_state, response = return_fsm.start(user_id, decision.slots)
+        _send_fsm_response(chat_id, response)
+        return True
 
     # unknown → agent（自由推理）
     return False

@@ -63,6 +63,10 @@ def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | No
         if action.startswith("fsm_"):
             return _handle_fsm_button(open_id, chat_id, value)
 
+        # ── 还车表单 FSM 按钮（ret_*） ──────────────────────────────
+        if action.startswith("ret_"):
+            return _handle_return_button(open_id, value)
+
         # ── 选车（[选N] 按钮） ──────────────────────────────────────
         if action == "select_vehicle":
             vehicle_no = value.get("vehicle_no", "")
@@ -203,6 +207,18 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     log.info("fsm_button user=%s action=%s text=%r", open_id, action, text[:50] if text else None)
     new_state, response = car_booking_fsm.advance(open_id, text)
     log.info("fsm_button user=%s action=%s new_state=%s", open_id, action, new_state)
+    return _render_fsm_response(response)
+
+
+# ── 还车表单 FSM 按钮（ret_*） ──────────────────────────────────────────────
+
+def _handle_return_button(open_id: str, value: dict) -> tuple[str, dict | None]:
+    """ret_* 按钮 → 取 value 文本 → return_fsm.advance → 渲染。"""
+    from bot import return_fsm
+    text = str(value.get("value", ""))
+    new_state, response = return_fsm.advance(open_id, text)
+    log.info("ret_button user=%s action=%s new_state=%s",
+             open_id, value.get("action"), new_state)
     return _render_fsm_response(response)
 
 

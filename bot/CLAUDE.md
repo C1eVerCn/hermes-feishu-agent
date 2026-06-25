@@ -11,6 +11,7 @@ hermes-agent integration layer. Owns `AIAgent` lifecycle and the bridge from Fei
 - `fast_path.py` — 确定性查询快速路径：命中 `intent.match_query` 的精确短语 → `run_tool` 直接调 car_tools handler 并建卡（绕过 LLM）。Tier-1 与 Tier-2 query 共用 `run_tool`。
 - `card_action_handler.py` — deterministic Feishu card-button callback: `handle(open_id, value)` → 注入 CallerIdentity → 走 car_tools 业务（select_vehicle / confirm_booking / cancel_flow） → 返回 (toast_text, updated_card)。No LLM. Injected into `feishu.ws_client` by `main.py`.
 - `car_booking_fsm.py` — 13 状态约车 FSM。`advance()` 逐状态推进；`start_booking(user_id, slots)` 用 Tier-2 抽到的槽位**播种**并跳到第一个缺口状态（"说全了的人直接到确认卡"）。意图/编号识别复用 `bot.intent`。
+- `return_fsm.py` — 还车表单 FSM（RET_VEHICLE→LOCATION→KEY→MODULE→STATUS→DESC→CONFIRM）。收集新版上游 return_vehicle 的 5 个必填字段 + 二次确认卡。入口：Tier-1 `intent.is_return_intent` 或 Tier-2 `return`；按钮用 `ret_*` action（card_action_handler 分发）。
 - `agent_pool.py` — LRU pool of `AIAgent` instances keyed by `user_id`; max 100 entries; thread-safe. Generates stable `session_id = f"feishu_{user_id}"`, registers/evicts `ocl.session_map` mappings for the feishu_acl plugin. Mounts DMZMemoryProvider per user.
 - `car_state.py` — per-user 车辆预约状态机（10min TTL）：save / update / get / clear / as_dict。记录用户当前正在进行的 booking / cancel / return / approve / records 意图与已收集的槽位。
 - `reservation_store.py` — 持久化 reservation_id → applicant_open_id，用于审批后 DM 申请人（vehicle_no 字段替代旧 bench_no）。

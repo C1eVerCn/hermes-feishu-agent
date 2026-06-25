@@ -130,9 +130,10 @@ Tier-2 现支持 cancel/return/approve：`intent_router` 额外抽 `vehicle_no`/
 - **cancel（取消）→ 二次确认**：先发确认卡（[确认取消]/[放弃]），用户点确认后由
   `card_action_handler._handle_confirm_mutation` 执行。识别符为 vehicle_no（新版上游去掉
   reservationId，cancel 以 vehicleNo/vin 为键）。
-- **return（归还）→ 交 agent**：新版上游 return 需 5 个必填字段（还车地点/钥匙位置/变更模块/
-  车辆状态/状态描述），一键确认不足以收集，故交完整 agent 对话式收集。后续可建 return 表单 FSM
-  + 二次确认。
+- **return（归还）→ 还车表单 FSM + 二次确认**：`bot/return_fsm.py` 一步步收集 5 个必填字段
+  （车辆编号→还车地点→钥匙位置→变更模块→车辆状态→状态描述）→ 确认卡 [确认归还]/[取消] →
+  执行 `return_vehicle`。入口：Tier-1 `intent.is_return_intent`（"还车/归还"，Minimax 不可用也能进）
+  或 Tier-2 `return`（带 vehicle_no 播种）。按钮用 `ret_*` action，由 card_action_handler 分发。
 - **approve（审批）→ 直接执行**：需 role≥2 + vehicle_no + approved 明确；后端再按归属细粒度鉴权。
   （用户只要求 cancel/return 二次确认；approve 如需也可加确认卡。）
 - 必须有 vehicle_no 才走 Tier-2，否则落 agent 追问；后端按 emailAddress/mobile + 归属双重把关。

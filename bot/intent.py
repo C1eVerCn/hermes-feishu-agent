@@ -145,6 +145,22 @@ _NEGATION_RE = re.compile(r"不|没|别|无需|算了|取消|不要了")
 # "把 PNV332 的预约取消掉" 因含编号被 embedded-id 规则误判成约车。
 _ACTION_BLOCK_RE = re.compile(r"取消|退订|退还|归还|还车|审批|批准|驳回|拒绝")
 
+# 还车意图（Tier-1）：含 还车/归还/交车 且无否定、非查询。"归还记录/查询"等归类为查询。
+_RETURN_RE = re.compile(r"还车|归还|交车")
+_QUERY_HINT_RE = re.compile(r"记录|查询|查看|列表|历史|查一下|看一下|有哪些")
+
+
+def is_return_intent(text: str) -> bool:
+    """Tier-1 还车意图：含 还车/归还/交车，无否定、非查询语句。"""
+    norm = (text or "").strip()
+    if not norm:
+        return False
+    if not _RETURN_RE.search(norm):
+        return False
+    if _NEGATION_RE.search(norm[:8]) or _QUERY_HINT_RE.search(norm):
+        return False
+    return True
+
 
 def has_booking_verb(text: str) -> bool:
     """verb+vehicle 模式命中且无前置否定。"""
