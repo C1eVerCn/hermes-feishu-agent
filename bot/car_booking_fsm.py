@@ -197,16 +197,17 @@ def _input_form_card(title: str, placeholder: str, button_text: str,
     飞书 Card 2.0 的 form 元素：内含 input（单行文本输入框）和 button（提交）。
     用户在 input 里输入文本后点 button，飞书回调事件带：
       - action.tag = "form"
-      - action.form_value = {input_name: 用户输入的文本}
+      - action.form_value = {input_name: 用户输入的文本}（form 聚合提交）
+      - action.input_value = 用户输入的文本（input 元素单独提交）
       - action.value = button 的 value 字段（{action: "fsm_input_xxx_form"}）
 
-    feishu/ws_client._extract_card_action 把 form_value[input_name] 扁平化到
-    value['value']，让下游 card_action_handler._handle_fsm_button 当作普通按钮
-    value 处理（text = value['value']），进 FSM 后被 _llm_extract_task 抽取为
-    task_name。
+    feishu/ws_client._extract_card_action 把 form_value[input_name] / input_value
+    扁平化到 value['value']，让下游 card_action_handler._handle_fsm_button
+    当作普通按钮 value 处理。
 
-    2026-06-18 改：替代之前的"✍️ 请直接输入任务名称" 文本提示，
-    给用户真正的 input field + 确认按钮 UX。
+    2026-06-25 fix：Card 2.0 form input 元素的 value 字段类型必须是 string（之前
+    误用 {"tag": "plain_text", "content": ""} 对象格式，可能被 lark 拒绝）。
+    简化结构只保留必要字段（name, placeholder, max_length, button value）。
     """
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md", "content": title}},
@@ -215,8 +216,7 @@ def _input_form_card(title: str, placeholder: str, button_text: str,
              {"tag": "input",
               "name": input_name,
               "placeholder": {"tag": "plain_text", "content": placeholder},
-              "max_length": max_length,
-              "value": {"tag": "plain_text", "content": ""}},
+              "max_length": max_length},
              {"tag": "button", "type": "primary",
               "text": {"tag": "plain_text", "content": button_text},
               "value": {"action": action}},
