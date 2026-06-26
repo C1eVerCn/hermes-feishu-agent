@@ -326,19 +326,17 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
 
     # 2026-06-25 fix：通知同车组调度员/管理员有新预约待审批。
     # 用 fmp 返的 message（含 "调度员：name(email)" 格式）提取 email，
-    # 然后用 notify 异步 DM 给这些调度员（不发给申请人自己避免重复）。
-    # 申请人已通过 SUCCESS 卡看到预约信息；DM 是给调度员的提醒。
+    # 然后用 notify 异步 DM 给这些调度员。
+    # 2026-06-26：去掉"排除申请人自己"——当申请人本身就是该车调度员（如管理员约自己
+    # 管的车）时也应收到待审批提醒（他仍需正式审批），否则成功卡承诺的"调度员会收到
+    # 通知"对这类用户落空。
     try:
         from feishu import notify
-        from ocl import identity as _identity
-        user_email = _identity.email_of(user_id) or ""
         # 提取 email —— fmp 消息格式如 "调度员：xxx(name@immotors.com)"，
         # 用通用 email regex 提取所有 email 地址。
         import re as _re
         dispatcher_emails = list(set(_re.findall(
             r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", fmp_message)))
-        # 排除申请人自己（避免自己给自己发 DM）
-        dispatcher_emails = [e for e in dispatcher_emails if e != user_email]
         if dispatcher_emails:
             subject = f"📬 新预约待审批：{pending_c.vehicle_no}"
             body = (
@@ -356,6 +354,9 @@ def _do_commit(user_id: str) -> tuple[str, dict]:
             )
             log.info("dispatcher_dm_sent user=%s vehicle=%s dispatchers=%d",
                      user_id, pending_c.vehicle_no, len(dispatcher_emails))
+        else:
+            log.info("dispatcher_dm_skip user=%s vehicle=%s (message 未含调度员 email)",
+                     user_id, pending_c.vehicle_no)
     except Exception as e:
         log.warning("dispatcher_dm_failed: %s", e)
 
