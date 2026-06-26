@@ -254,6 +254,67 @@ def _chip_card(vehicle_type_detail: str = "") -> dict:
     )
 
 
+# ── 动态车型/芯片（RBAC 驱动，2026-06-26）──────────────────────────────────
+# 不再硬编码车型/芯片清单：进约车流程时拉一次该用户「可约车辆」（后端按 RBAC
+# 已过滤），从中去重出车型(车型细分) / 芯片(platform) 作为下拉选项；芯片随车型联动。
+# 同时天然使用后端**精确值**（如「大Fcar」），消除 ?Fcar / 大F车 这类硬编码偏差。
+
+def _fetch_available_for_user(user_id: str) -> list[dict]:
+    """拉该用户可约的全部车（无 filter = RBAC 过滤后），归一化并缓存到 last_vehicles。"""
+    from car_tools import mcp_client as _mc
+    try:
+        raw = _mc.get_mcp_client().call("fetch_available_vehicles", {})
+    except Exception as e:
+        log.warning("dynamic_fetch_failed user=%s err=%s", user_id, e)
+        return []
+    if isinstance(raw, dict):
+        items = raw.get("data") or raw.get("items") or raw.get("vehicles") or []
+    elif isinstance(raw, list):
+        items = raw
+    else:
+        items = []
+    vehicles = [normalizers._vehicle_to_card_dict(v) for v in items if isinstance(v, dict)]
+    if vehicles:
+        car_state.save(user_id, last_vehicles=vehicles)
+    return vehicles
+
+
+def _type_options(vehicles: list[dict]):
+    """(车型列表, 显示map)。vehicles 无「车型细分」时回退到固定 VEHICLE_TYPE_BUTTONS。"""
+    from collections import Counter
+    counts = Counter(v.get("vehicle_type_detail") for v in vehicles
+                     if v.get("vehicle_type_detail")) if vehicles else None
+    if counts:
+        types = [t for t, _ in counts.most_common()]
+        return types, {t: f"{t}（{counts[t]} 辆）" for t in types}
+    return list(VEHICLE_TYPE_BUTTONS), {}
+
+
+def _chip_options(vehicles: list[dict], vehicle_type_detail: str):
+    """(芯片列表, 显示map)，随车型联动。vehicles 无匹配时回退到固定 CHIP_BUTTONS。"""
+    from collections import Counter
+    counts = Counter(v.get("platform") for v in vehicles
+                     if v.get("vehicle_type_detail") == vehicle_type_detail
+                     and v.get("platform")) if vehicles else None
+    if counts:
+        chips = [c for c, _ in counts.most_common()]
+        return chips, {c: f"{c}（{counts[c]} 辆）" for c in chips}
+    return list(CHIP_BUTTONS), {}
+
+
+def _dynamic_type_card(vehicles: list[dict]) -> dict:
+    types, display = _type_options(vehicles)
+    suffix = "（仅显示您可约的）" if display else ""
+    return _select_card(f"**🚗 第 1/8 步：选择车型**{suffix}", "点击选择车型",
+                        types, "fsm_select_type", display_map=display)
+
+
+def _dynamic_chip_card(vehicles: list[dict], vehicle_type_detail: str) -> dict:
+    chips, display = _chip_options(vehicles, vehicle_type_detail)
+    return _select_card(f"**🧠 第 2/8 步：选择芯片平台**（车型 {vehicle_type_detail}）",
+                        "点击选择芯片", chips, "fsm_select_chip", display_map=display)
+
+
 def _duration_card(pending) -> dict:
     """SELECT_DURATION：当前时长显示 + [-30] [+30] [确认] 按钮。
 
@@ -736,48 +797,47 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             return STATE_DIRECT_BY_ID, {
                 "text": "请输入车辆编号（如 SNV018 / PNV000）：",
             }
-        # 收到"不知道"按钮回调 → 展示车型卡
+        # 收到"不知道"按钮回调 → 拉该用户可约车辆 → 动态车型卡
         if text == _FSM_KNOWN_NO_MARKER:
-            return STATE_SELECT_VEHICLE_TYPE, _type_card()
+            vehicles = _fetch_available_for_user(user_id)
+            return STATE_SELECT_VEHICLE_TYPE, {"card": _dynamic_type_card(vehicles)}
         # 默认：渲染问询卡（保持 state=START）
         return STATE_START, _entry_card()
 
-    # SELECT_VEHICLE_TYPE：收车型细分按钮（用户从"不知道"路径过来）
+    # SELECT_VEHICLE_TYPE：收车型（动态：仅该用户可约车型；回退固定清单）
     if current_state == STATE_SELECT_VEHICLE_TYPE:
-        if text in VEHICLE_TYPE_BUTTONS:
-            # 细分（如 DM0/CM0/427-M1）存到 vehicle_type_detail 字段
+        vehicles = (pending.last_vehicles if pending else []) or []
+        valid_types, _disp = _type_options(vehicles)
+        if text in valid_types:
             car_state.save(user_id, vehicle_type_detail=text)
-            # 统一用 _chip_card 渲染（与"重渲染"路径一致），UI 不分叉
-            # 2026-06-18 fix：之前用 ** 展开 {"card": <v2>} 会把 card 内的 schema/
-            # config/body 三个键混进 response 顶层，导致飞书 raw 回调 data 字段
-            # 拿到错误结构（"未识别车型「DM0」" 等场景会复现）。改用显式 "card" 键
-            # 包 card_dict 本身。
             return STATE_CONFIRM_CHIP, {
                 "text": f"已选车型 {text}。请选择芯片平台：",
-                "card": _chip_card(vehicle_type_detail=text),
+                "card": _dynamic_chip_card(vehicles, text),
             }
         return STATE_SELECT_VEHICLE_TYPE, {
             "text": f"未识别车型「{text}」。请从下拉选择：",
-            "card": _type_card(),
+            "card": _dynamic_type_card(vehicles),
         }
 
-    # CONFIRM_CHIP：收芯片按钮 → 直接进 SELECT_DURATION（车型+芯片+时长都明确后才查车）
+    # CONFIRM_CHIP：收芯片（动态：仅该车型下可约芯片；回退固定清单）
     if current_state == STATE_CONFIRM_CHIP:
         chip = text.strip()
-        if chip in CHIP_BUTTONS:
+        vehicles = (pending.last_vehicles if pending else []) or []
+        vtype = pending.vehicle_type_detail if pending else ""
+        valid_chips, _disp = _chip_options(vehicles, vtype)
+        if chip in valid_chips:
             car_state.save(user_id, chip=chip)
             pending_now = car_state.get(user_id)
             if not pending_now.duration_minutes:
                 car_state.save(user_id, duration_minutes=DEFAULT_DURATION_MINUTES)
             return STATE_SELECT_DURATION, _duration_card(car_state.get(user_id))
-        # 未知输入（含旧按钮残留 / 文本乱打）→ 错误回显 + 重渲染下拉卡
-        # review finding 4 修复：原代码删了"未识别芯片「{text}」"错误信息，
-        # 用户看不到自己输错了什么。这里恢复文本反馈 + 卡片（双重显示）。
-        pending_now = car_state.get(user_id)
+        # 未知输入 → 错误回显 + 重渲染动态下拉
         return STATE_CONFIRM_CHIP, {
             "text": f"未识别芯片「{chip}」。请从下拉选择：",
-            "card": _chip_card(vehicle_type_detail=pending_now.vehicle_type_detail if pending_now else ""),
+            "card": _dynamic_chip_card(vehicles, vtype),
         }
+
+    # SELECT_DURATION：±30min 按钮选择器（30~480 min，30 步进）
 
     # SELECT_DURATION：±30min 按钮选择器（30~480 min，30 步进）
     if current_state == STATE_SELECT_DURATION:

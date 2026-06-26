@@ -604,3 +604,40 @@ def test_e2e_pick_slot_through_input_task():
     new_state, _ = advance("ou_e2e", "上海")
     assert new_state == "CONFIRM"
     car_state.clear("ou_e2e")
+
+
+# ── 动态车型/芯片（RBAC 驱动）─────────────────────────────────────────────
+def test_dynamic_type_options_from_vehicles():
+    from bot.car_booking_fsm import _type_options, _chip_options
+    vehicles = [
+        {"vehicle_type_detail": "大Fcar", "platform": "Thor"},
+        {"vehicle_type_detail": "大Fcar", "platform": "Thor"},
+        {"vehicle_type_detail": "BM0", "platform": "Orin"},
+    ]
+    types, disp = _type_options(vehicles)
+    assert types[0] == "大Fcar"  # 数量最多排第一
+    assert "2 辆" in disp["大Fcar"] and "1 辆" in disp["BM0"]
+    # 芯片随车型联动
+    chips, cdisp = _chip_options(vehicles, "大Fcar")
+    assert chips == ["Thor"]
+    assert _chip_options(vehicles, "BM0")[0] == ["Orin"]
+
+
+def test_dynamic_type_options_fallback_when_empty():
+    """无车辆数据 → 回退固定清单（不崩、不空）。"""
+    from bot.car_booking_fsm import _type_options, _chip_options, VEHICLE_TYPE_BUTTONS, CHIP_BUTTONS
+    assert _type_options([])[0] == list(VEHICLE_TYPE_BUTTONS)
+    assert _chip_options([], "X")[0] == list(CHIP_BUTTONS)
+
+
+def test_dynamic_select_type_chains_to_chip(monkeypatch):
+    """SELECT_VEHICLE_TYPE 选动态车型（来自 last_vehicles）→ CONFIRM_CHIP，芯片联动。"""
+    from bot import car_state
+    from bot.car_booking_fsm import advance
+    vehicles = [{"vehicle_type_detail": "大Fcar", "platform": "Thor"},
+                {"vehicle_type_detail": "BM0", "platform": "Orin"}]
+    car_state.save("ou_dyn", state="SELECT_VEHICLE_TYPE", last_vehicles=vehicles)
+    new_state, resp = advance("ou_dyn", "大Fcar")
+    assert new_state == "CONFIRM_CHIP"
+    assert car_state.get("ou_dyn").vehicle_type_detail == "大Fcar"
+    car_state.clear("ou_dyn")
