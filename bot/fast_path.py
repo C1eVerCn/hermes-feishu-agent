@@ -94,11 +94,11 @@ def run_tool(tool_name: str, user_id: str, role: int, args: dict | None = None) 
             return _render_vehicles(parsed, args, user_id)
         if tool_name == "fetch_user_reservation":
             n = len(parsed) if isinstance(parsed, list) else 0
-            card = build_records_card(parsed, title=f"📋 我的预约（共 {n} 条）")
+            card = car_card_builder.build_records_card(parsed, title=f"我的预约（共 {n} 条）")
             return {"card": card, "text": None, "blocked": False}
         if tool_name == "fetch_user_approval":
             n = len(parsed) if isinstance(parsed, list) else 0
-            card = build_records_card(parsed, title=f"📋 我的待审批（共 {n} 条）")
+            card = car_card_builder.build_records_card(parsed, title=f"我的待审批（共 {n} 条）")
             return {"card": card, "text": None, "blocked": False}
 
         return {"text": "📋 查询成功。", "blocked": False, "card": None}
@@ -225,35 +225,5 @@ def _render_vehicles(parsed, args: dict, user_id: str) -> dict:
     return {"card": card, "text": None, "blocked": False}
 
 
-def build_records_card(records: list, *, title: str) -> dict:
-    """我的预约 / 我的待审批 表格卡（带状态徽标）。"""
-    if not records:
-        return {"config": {"wide_screen_mode": True},
-                "elements": [{"tag": "div",
-                              "text": {"tag": "lark_md",
-                                       "content": f"{title}\n\n（暂无记录）"}}]}
-    lines = ["| 车辆 | 平台 | 时间 | 任务 | 状态 |",
-             "|------|------|------|------|------|"]
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        status = r.get("status", "")
-        if status in ("待审批", "已批准", "已驳回", "已取消", "已归还"):
-            badge_map = {
-                "待审批": "🟡待审批", "已批准": "🟢已批准", "已驳回": "🔴已驳回",
-                "已取消": "⚪已取消", "已归还": "✅已归还",
-            }
-            status = badge_map.get(status, status)
-        vno = r.get("vehicle_no", "")
-        vno_short = vno[-6:] if vno and len(vno) >= 6 else vno  # 显示后 6 位
-        lines.append(
-            f"| `{vno_short}` "
-            f"| {r.get('platform') or '-'} "
-            f"| {r.get('start_time','')} ~ {r.get('end_time','')} "
-            f"| {r.get('task_name') or '-'} "
-            f"| {status} |"
-        )
-    return {"config": {"wide_screen_mode": True},
-            "elements": [{"tag": "div",
-                          "text": {"tag": "lark_md",
-                                   "content": f"{title}\n\n" + "\n".join(lines)}}]}
+# build_records_card 已统一到 car_tools.card_builder.build_records_card（Card 2.0，
+# 与 [我的预约] 按钮、其它记录卡同一渲染器，避免样式不一致）。本模块不再自带。
