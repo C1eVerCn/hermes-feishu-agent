@@ -16,6 +16,10 @@ FROM python:3.14-slim
 
 WORKDIR /app
 
+# 时区设为中国（python:slim 自带 tzdata）。让 datetime.now() 返回北京时间——
+# 约车时段/日志统一用北京时间（compose 也设了 TZ，这里 baked-in 兜底）。
+ENV TZ=Asia/Shanghai
+
 # 运行时依赖（取自 pyproject.toml [project.dependencies]）
 # 注：hermes-agent 包很大（~10MB），docker build 网络偶发 IncompleteRead；给足
 # timeout + 多次重试，并允许拆单下载分次重试

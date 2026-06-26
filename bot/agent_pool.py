@@ -82,8 +82,8 @@ def _warmup_agent(agent) -> None:
 
 def _now_cn() -> str:
     """Return current CN-time as 'YYYY-MM-DD HH:MM:SS (周X)'. Refreshed per call
-    so the prompt never goes stale."""
-    now = datetime.now() + timedelta(hours=8)  # UTC+8 China
+    so the prompt never goes stale. 容器 TZ=Asia/Shanghai → datetime.now() 已是北京时间。"""
+    now = datetime.now()
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     return now.strftime("%Y-%m-%d %H:%M:%S") + f" (周{weekdays[now.weekday()]})"
 

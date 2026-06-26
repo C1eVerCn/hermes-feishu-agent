@@ -21,6 +21,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      # 容器时区设为中国（python:slim 自带 tzdata）。统一让 datetime.now() 返回
+      # 北京时间——修复约车时段/日志的 UTC 偏移（用户看到"01:30"实为 UTC=北京09:30）。
+      TZ: Asia/Shanghai
       # 上游 fmp-mcp 服务的 SSE MCP 端点（dmz-fmp-mcp 容器在 docker_fmp-net 网络中）
       # booking_mcp_server 用 Python mcp 包通过 SSE+JSON-RPC 调上游 8 个 @Tool
       CAR_MCP_SSE_URL: http://dmz-fmp-mcp:9015/fmpMCP/sse

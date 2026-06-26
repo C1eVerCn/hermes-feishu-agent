@@ -66,7 +66,7 @@ class RouteResult:
 
 
 def _now_cn() -> str:
-    now = datetime.now() + timedelta(hours=8)  # UTC+8
+    now = datetime.now()  # 容器 TZ=Asia/Shanghai → 已是北京时间
     weekdays = ["一", "二", "三", "四", "五", "六", "日"]
     return now.strftime("%Y-%m-%d %H:%M:%S") + f" (周{weekdays[now.weekday()]})"
 
