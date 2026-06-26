@@ -51,6 +51,15 @@ def _inject_caller(args: dict) -> dict:
     return {**injected, **args}
 
 
+def _business_error(raw_obj) -> str | None:
+    """上游业务拒绝识别：mutation 成功时 data 是 dict；失败时 ``data`` 为 null 且
+    ``message`` 给出原因（如"当前用户在该时间段内已存在未完成的预约记录，请选择其他时间段"，
+    注意上游此时 code 仍为 200）。命中则返回 message，否则 None。"""
+    if isinstance(raw_obj, dict) and "data" in raw_obj and raw_obj.get("data") is None:
+        return raw_obj.get("message") or "操作未成功，请稍后重试"
+    return None
+
+
 def _call_mcp(tool_name: str, args: dict) -> str:
     """调 MCP 工具，返回 stringified JSON（dict / list 均可被下游 json.loads）。
 
@@ -126,6 +135,9 @@ def _commit_single_vehicle_reservation(args: dict, **_) -> str:
         return raw
     if isinstance(raw_obj, dict) and "error" in raw_obj:
         return json.dumps(raw_obj, ensure_ascii=False)
+    _biz = _business_error(raw_obj)
+    if _biz:
+        return json.dumps({"error": _biz}, ensure_ascii=False)
     try:
         caller = get_current_caller()
         applicant = caller.as_dict() if caller.is_authenticated else None
@@ -264,6 +276,9 @@ def approval_vehicle_reservation(args: dict, **_) -> str:
         raw_obj = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, ValueError):
         return raw
+    _biz = _business_error(raw_obj)
+    if _biz:
+        return json.dumps({"error": _biz}, ensure_ascii=False)
     try:
         result = normalizers.normalize_approval_result(raw_obj)
     except normalizers.NormalizeError as e:
@@ -324,6 +339,9 @@ def return_vehicle(args: dict, **_) -> str:
         raw_obj = json.loads(raw) if isinstance(raw, str) else raw
     except (json.JSONDecodeError, ValueError):
         return raw
+    _biz = _business_error(raw_obj)
+    if _biz:
+        return json.dumps({"error": _biz}, ensure_ascii=False)
     try:
         result = normalizers.normalize_return_result(raw_obj)
         return json.dumps(result.model_dump(), ensure_ascii=False)

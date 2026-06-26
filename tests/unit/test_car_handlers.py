@@ -50,6 +50,36 @@ def auth_caller():
     return CallerIdentity(openid="ou_alice", email="alice@x.com")
 
 
+def test_commit_surfaces_business_error_message(monkeypatch):
+    """上游 {code:200, data:null, message:...} 业务拒绝 → 把 message 当 error 返回，
+    而非吐"上游返回格式异常: data 字段不是 dict"。"""
+    fm = FakeMcp(results={"single_vehicle_reservation": {
+        "code": 200, "data": None,
+        "message": "当前用户在该时间段内已存在未完成的预约记录，请选择其他时间段",
+    }})
+    monkeypatch.setattr(mcp_client, "_client", fm)
+    set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    raw = handlers._commit_single_vehicle_reservation({
+        "vehicleNo": "AATI25SNV639", "startTime": "2026-06-26 09:50",
+        "endTime": "2026-06-26 10:50", "taskName": "MFF调试", "location": "上海"})
+    res = json.loads(raw)
+    assert "已存在未完成的预约记录" in res.get("error", "")
+    assert "格式异常" not in res.get("error", "")
+
+
+def test_commit_success_still_normalizes(monkeypatch):
+    """data 是 dict（成功）→ 正常 normalize，不被 _business_error 误判。"""
+    fm = FakeMcp(results={"single_vehicle_reservation": {
+        "code": 200, "data": {"vehicleNo": "PNV1", "startTime": "2026-06-26 09:50",
+                               "endTime": "2026-06-26 10:50", "taskName": "t", "location": "上海"}}})
+    monkeypatch.setattr(mcp_client, "_client", fm)
+    set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    raw = handlers._commit_single_vehicle_reservation({"vehicleNo": "PNV1"})
+    res = json.loads(raw)
+    assert "error" not in res
+    assert res.get("vehicle_no") == "PNV1"
+
+
 # ── 身份注入 ──────────────────────────────────────────────────────────────
 
 def test_caller_injected_into_args(fake_mcp, auth_caller):
