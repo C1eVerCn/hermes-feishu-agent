@@ -84,18 +84,22 @@ def _email_to_open_id(email: str) -> str:
     """
     if not email:
         return ""
+    # 0) 优先用 remember_open_id 播种的本 app open_id（handler 每条入站消息都会写）。
+    #    放最前面：identity_map 可能残留**跨 app** open_id（admin_assign/同步留下的），
+    #    若先用它会导致 DM 发送 99992361 open_id cross app。remembered 的一定是本 app 的。
+    with _OPEN_ID_LOCK:
+        cached = _OPEN_ID_CACHE.get(email)
+    if cached:
+        return cached
     # 1) Local identity index — built from identity_map.json v2 schema.
     #    No Feishu API call, no quota burn.
     from ocl import identity as _identity
     oid = _identity.open_id_of(email)
     if oid:
         with _OPEN_ID_LOCK:
-            _OPEN_ID_CACHE[email] = oid
+            _OPEN_ID_CACHE.setdefault(email, oid)  # 不覆盖 remembered 的本 app 值
         return oid
     with _OPEN_ID_LOCK:
-        if email in _OPEN_ID_CACHE:
-            log.debug("email_to_open_id HIT email=%s oid=%s", email, _OPEN_ID_CACHE[email])
-            return _OPEN_ID_CACHE[email]
         if email in _OPEN_ID_NEG:
             log.debug("email_to_open_id NEG hit email=%s", email)
             return ""

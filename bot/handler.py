@@ -102,6 +102,10 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
 
     # ── 身份闸：解析 email/role/mobile + 注入 CallerIdentity ───────────────
     role, email, name, mobile = _resolve_identity(user_id)
+    if user_id and email:
+        # 用本 app 的 open_id 播种 email↔open_id（DM 解析优先用它，避免 identity_map
+        # 里残留的跨 app open_id 被选中导致 99992361 open_id cross app 发送失败）。
+        notify.remember_open_id(user_id, email=email)
     set_current_caller(CallerIdentity(openid=user_id, email=email, mobile=mobile or None))
 
     # ── FSM 续答：用户在挂起状态时 ───────────────────────────────────────

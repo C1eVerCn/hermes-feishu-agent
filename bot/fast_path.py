@@ -94,7 +94,8 @@ def run_tool(tool_name: str, user_id: str, role: int, args: dict | None = None) 
             return _render_vehicles(parsed, args, user_id)
         if tool_name == "fetch_user_reservation":
             n = len(parsed) if isinstance(parsed, list) else 0
-            card = car_card_builder.build_records_card(parsed, title=f"我的预约（共 {n} 条）")
+            card = car_card_builder.build_records_card(
+                parsed, title=f"我的预约（共 {n} 条）", show_cancel=True)
             return {"card": card, "text": None, "blocked": False}
         if tool_name == "fetch_user_approval":
             n = len(parsed) if isinstance(parsed, list) else 0

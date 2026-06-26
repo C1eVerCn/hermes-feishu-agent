@@ -166,3 +166,48 @@ def test_fail_card_no_context():
     card = cb.build_fail_card("some error")
     elements = card["body"]["elements"]
     assert any("❌" in e["text"]["content"] for e in elements)
+
+
+def _all_buttons(card):
+    """递归收集卡里所有 button（_button_row 会把按钮包进 column_set）。"""
+    out = []
+    def walk(el):
+        if isinstance(el, dict):
+            if el.get("tag") == "button":
+                out.append(el)
+            for v in el.values():
+                walk(v)
+        elif isinstance(el, list):
+            for x in el:
+                walk(x)
+    walk(card)
+    return out
+
+
+def test_records_card_cancel_button_on_pending():
+    """show_cancel=True 时，待审批记录挂 [取消该预约] 按钮（action=cancel_record）。"""
+    recs = [
+        {"vehicle_no": "AATI25SNV639", "platform": "Thor", "status": "待审批",
+         "start_time": "2026-06-26 14:00", "end_time": "2026-06-26 15:00", "task_name": "冒烟"},
+        {"vehicle_no": "AATI25SNV639", "platform": "Thor", "status": "已取消",
+         "start_time": "2026-06-25 10:00", "end_time": "2026-06-25 11:00", "task_name": "x"},
+    ]
+    card = cb.build_records_card(recs, title="我的预约", show_cancel=True)
+    cancel_btns = [b for b in _all_buttons(card)
+                   if b.get("value", {}).get("action") == "cancel_record"]
+    assert len(cancel_btns) == 1, "只有待审批那条该有取消按钮"
+    assert cancel_btns[0]["value"]["vehicle_no"] == "AATI25SNV639"
+    assert cancel_btns[0]["value"]["start_time"] == "2026-06-26 14:00"
+
+
+def test_records_card_no_cancel_when_disabled():
+    recs = [{"vehicle_no": "PNV1", "status": "待审批", "start_time": "x", "end_time": "y"}]
+    card = cb.build_records_card(recs, title="我的待审批")  # show_cancel 默认 False
+    assert not _all_buttons(card)
+
+
+def test_cancel_confirm_card_shows_time():
+    card = cb.build_cancel_confirm_card("PNV332", start_time="2026-06-26 14:00")
+    body = " ".join(e.get("text", {}).get("content", "") for e in card["body"]["elements"]
+                    if e.get("tag") == "div")
+    assert "PNV332" in body and "2026-06-26 14:00" in body

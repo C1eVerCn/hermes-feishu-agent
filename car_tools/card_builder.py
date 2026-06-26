@@ -248,14 +248,15 @@ def build_fail_card(error: str, *, context: str = "") -> dict:
 
 # ── mutation 二次确认卡（Tier-2 cancel 等危险操作） ──────────────────────────
 
-def build_cancel_confirm_card(vehicle_no: str) -> dict:
+def build_cancel_confirm_card(vehicle_no: str, start_time: str = "") -> dict:
     """取消预约二次确认卡：[确认取消] / [放弃]。
 
     确认按钮 value 携带要执行的操作与车辆编号（无状态，回调端重建参数执行）。
     """
+    when = f"\n⏱️ 时段：{start_time}" if start_time else ""
     return _card_base([
         _div(f"⚠️ **确认取消预约？**\n\n"
-             f"🚗 车辆编号：**{vehicle_no}**\n\n"
+             f"🚗 车辆编号：**{vehicle_no}**{when}\n\n"
              f"取消后该预约将作废，无法恢复。请确认："),
         _button_row([
             _button("✅ 确认取消", {"action": "confirm_mutation",
@@ -267,40 +268,39 @@ def build_cancel_confirm_card(vehicle_no: str) -> dict:
 
 # ── 3. 预约/审批记录卡片（fast-path 用） ────────────────────────────────────
 
-def build_records_card(records: list, *, title: str) -> dict:
-    """2026-06-25 fix：从 bot/handler.py 移过来。fast-path "我的预约" / "我的待审批"
-    渲染 records 表格。records 是 list[dict]，每个含 vehicle_no/platform/start_time/
-    end_time/task_name/status 字段。空列表显示「暂无记录」。
+def build_records_card(records: list, *, title: str, show_cancel: bool = False) -> dict:
+    """我的预约 / 我的待审批 记录卡。records 是 list[dict]，每个含 vehicle_no/platform/
+    start_time/end_time/task_name/status。空列表显示「暂无记录」。
 
-    显示：
-    - 车辆后 6 位（与 build_vehicles_card 一致）
-    - 状态 emoji 徽章（待审批→🟡等）
+    2026-06-26：从单块 markdown 表格改成**每条一个 div**，并在 ``show_cancel=True`` 且该条
+    为「待审批」时挂一个 [❌ 取消该预约] 按钮 —— 让用户**不依赖 LLM**、直接点按钮取消
+    （走 card_action_handler 的 cancel_record → 二次确认 → cancel）。
     """
     if not records:
-        return _card_base([
-            _div(f"📋 {title}\n\n（暂无记录）"),
-        ])
-    lines = ["| 车辆 | 平台 | 时间 | 任务 | 状态 |",
-             "|------|------|------|------|------|"]
+        return _card_base([_div(f"📋 {title}\n\n（暂无记录）")])
+    _badge = {"待审批": "🟡待审批", "已批准": "🟢已批准", "已驳回": "🔴已驳回",
+              "已取消": "⚪已取消", "已归还": "✅已归还", "已完成": "✅已完成"}
+    elements: list[dict] = [_div(f"📋 **{title}**")]
     for r in records:
         if not isinstance(r, dict):
             continue
         status = r.get("status", "")
-        if status in ("待审批", "已批准", "已驳回", "已取消", "已归还"):
-            badge_map = {
-                "待审批": "🟡待审批", "已批准": "🟢已批准", "已驳回": "🔴已驳回",
-                "已取消": "⚪已取消", "已归还": "✅已归还",
-            }
-            status = badge_map.get(status, status)
+        badge = _badge.get(status, status or "-")
         vno = r.get("vehicle_no", "")
         vno_short = vno[-6:] if vno and len(vno) >= 6 else vno
-        lines.append(
-            f"| `{vno_short}` "
-            f"| {r.get('platform') or '-'} "
-            f"| {r.get('start_time','')} ~ {r.get('end_time','')} "
-            f"| {r.get('task_name') or '-'} "
-            f"| {status} |"
+        line = (
+            f"{badge}  `{vno_short}`  {r.get('platform') or '-'}\n"
+            f"⏱️ {r.get('start_time','')} ~ {r.get('end_time','')}\n"
+            f"📝 {r.get('task_name') or '-'}　📍 {r.get('location') or '-'}"
         )
-    return _card_base([
-        _div(f"📋 {title}\n\n" + "\n".join(lines)),
-    ])
+        elements.append(_div(line))
+        if show_cancel and status == "待审批" and vno:
+            elements.append(_button_row([
+                _button("❌ 取消该预约",
+                        {"action": "cancel_record", "vehicle_no": vno,
+                         "start_time": r.get("start_time", "")}, "danger"),
+            ]))
+        elements.append(_hr())
+    if elements and elements[-1].get("tag") == "hr":
+        elements.pop()  # 去掉最后一条多余的分隔线
+    return _card_base(elements)

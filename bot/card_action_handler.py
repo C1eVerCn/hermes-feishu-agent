@@ -79,6 +79,15 @@ def handle(open_id: str, value: dict, chat_id: str = "") -> tuple[str, dict | No
                 open_id, chat_id, vehicle_no, vehicle_type, platform, license_plate,
                 email)
 
+        # ── 记录卡上的 [取消该预约] → 二次确认 ─────────────────────
+        if action == "cancel_record":
+            vehicle_no = value.get("vehicle_no", "")
+            start_time = value.get("start_time", "")
+            if not vehicle_no:
+                return "缺少车辆编号", None
+            return ("请确认取消",
+                    car_card_builder.build_cancel_confirm_card(vehicle_no, start_time=start_time))
+
         # ── 确认危险操作（cancel 二次确认） ─────────────────────────
         if action == "confirm_mutation":
             return _handle_confirm_mutation(open_id, value)
@@ -197,7 +206,7 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
                             "content": "📋 您当前没有预约记录。\n\n💡 可以说「约车」开始新预约。"
                         }}]))
             card = car_card_builder.build_records_card(
-                items, title=f"📋 我的预约（共 {n} 条）")
+                items, title=f"我的预约（共 {n} 条）", show_cancel=True)
             return ("📋 您的预约", card)
         except Exception as e:
             log.warning("fsm_done_records failed: %s", e)
