@@ -80,6 +80,22 @@ def test_commit_success_still_normalizes(monkeypatch):
     assert res.get("vehicle_no") == "PNV1"
 
 
+def test_commit_success_with_data_null_message(monkeypatch):
+    """上游成功也可能 data:null，成功信息在 message（"预约成功，请联系调度员审批"）→
+    必须当成功（无 error），而不是误报"提交失败"。"""
+    fm = FakeMcp(results={"single_vehicle_reservation": {
+        "code": 200, "data": None,
+        "message": "车辆AATI25SNV639预约成功，请联系调度员审批，车辆调度员：谌一航(chenyihang@immotors.com)",
+    }})
+    monkeypatch.setattr(mcp_client, "_client", fm)
+    set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    raw = handlers._commit_single_vehicle_reservation({"vehicleNo": "AATI25SNV639"})
+    res = json.loads(raw)
+    assert "error" not in res, f"成功不应有 error: {res}"
+    assert res.get("success") is True
+    assert "预约成功" in res.get("message", "")  # 保留 message 供 notify_dispatchers 提 email
+
+
 # ── 身份注入 ──────────────────────────────────────────────────────────────
 
 def test_caller_injected_into_args(fake_mcp, auth_caller):
