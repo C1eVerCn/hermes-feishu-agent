@@ -191,3 +191,36 @@ def test_fsm_pick_slot_dropdown_uses_picked_time():
     assert p.start_time == "2026-06-26 18:00", f"应订 18:00，实得 {p.start_time}"
     assert p.end_time == "2026-06-26 19:00"
     car_state.clear("ou_slot")
+
+
+def test_fsm_known_no_zero_cars_shows_message(monkeypatch):
+    """无车组用户（后端 code=200 data:null + 暂无车组）→ 明确提示，不展示车型清单。"""
+    from bot import car_booking_fsm as fsm, car_state
+    from car_tools import mcp_client as _mc
+
+    class _NoGroup:
+        def call(self, tool, args, timeout=10):
+            return {"code": 200, "data": None, "message": "当前用户暂无车组，请联系管理员添加"}
+    monkeypatch.setattr(_mc, "_client", _NoGroup())
+    car_state.save("ou_nogrp", state="START")
+    new_state, resp = fsm.advance("ou_nogrp", "__fsm_known_no__")
+    assert new_state == "START"
+    assert "暂无车组" in resp.get("text", "")
+    assert "card" not in resp  # 不展示约不到的车型下拉
+    car_state.clear("ou_nogrp")
+
+
+def test_fsm_known_no_upstream_error_falls_back(monkeypatch):
+    """上游报错（code=500）→ 当调用失败，回退固定车型卡（流程不断）。"""
+    from bot import car_booking_fsm as fsm, car_state
+    from car_tools import mcp_client as _mc
+
+    class _Err:
+        def call(self, tool, args, timeout=10):
+            return {"code": 500, "data": None, "message": "MCP 调用失败"}
+    monkeypatch.setattr(_mc, "_client", _Err())
+    car_state.save("ou_err", state="START")
+    new_state, resp = fsm.advance("ou_err", "__fsm_known_no__")
+    assert new_state == "SELECT_VEHICLE_TYPE"
+    assert resp.get("card") is not None
+    car_state.clear("ou_err")

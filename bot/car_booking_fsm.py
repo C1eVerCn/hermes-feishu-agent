@@ -259,24 +259,36 @@ def _chip_card(vehicle_type_detail: str = "") -> dict:
 # 已过滤），从中去重出车型(车型细分) / 芯片(platform) 作为下拉选项；芯片随车型联动。
 # 同时天然使用后端**精确值**（如「大Fcar」），消除 ?Fcar / 大F车 这类硬编码偏差。
 
-def _fetch_available_for_user(user_id: str) -> list[dict]:
-    """拉该用户可约的全部车（无 filter = RBAC 过滤后），归一化并缓存到 last_vehicles。"""
+def _fetch_available_for_user(user_id: str) -> tuple[list[dict], str, bool]:
+    """拉该用户可约的全部车（无 filter = RBAC 过滤后）。
+
+    返回 (vehicles, message, ok)：
+      - ok=False → 调用失败（网络/超时），调用方可回退固定清单保证流程不断。
+      - ok=True, vehicles 非空 → 正常。
+      - ok=True, vehicles 空 → 该用户无可约车（如"暂无车组"/"非平台用户"），message 是原因。
+    """
     from car_tools import mcp_client as _mc
     try:
         raw = _mc.get_mcp_client().call("fetch_available_vehicles", {})
     except Exception as e:
         log.warning("dynamic_fetch_failed user=%s err=%s", user_id, e)
-        return []
+        return [], "", False
     if isinstance(raw, dict):
         items = raw.get("data") or raw.get("items") or raw.get("vehicles") or []
+        message = raw.get("message", "") or ""
+        code = raw.get("code")
+        # 上游错误（如 code=500 "MCP 调用失败"）当**调用失败**处理（ok=False → 回退），
+        # 区别于 code=200 + data:null 的真"无可约车"（暂无车组/非平台用户）。
+        if not items and code not in (None, 200, 0):
+            return [], message, False
     elif isinstance(raw, list):
-        items = raw
+        items, message = raw, ""
     else:
-        items = []
+        items, message = [], ""
     vehicles = [normalizers._vehicle_to_card_dict(v) for v in items if isinstance(v, dict)]
     if vehicles:
         car_state.save(user_id, last_vehicles=vehicles)
-    return vehicles
+    return vehicles, message, True
 
 
 def _type_options(vehicles: list[dict]):
@@ -799,8 +811,16 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             }
         # 收到"不知道"按钮回调 → 拉该用户可约车辆 → 动态车型卡
         if text == _FSM_KNOWN_NO_MARKER:
-            vehicles = _fetch_available_for_user(user_id)
-            return STATE_SELECT_VEHICLE_TYPE, {"card": _dynamic_type_card(vehicles)}
+            vehicles, message, ok = _fetch_available_for_user(user_id)
+            if vehicles:
+                return STATE_SELECT_VEHICLE_TYPE, {"card": _dynamic_type_card(vehicles)}
+            if ok:
+                # 调用成功但 0 辆（无车组 / 非平台用户）→ 明确告知，不展示约不到的车型清单
+                car_state.clear(user_id)
+                msg = message or "您当前暂无可约车辆，请联系管理员为您添加车组。"
+                return STATE_START, {"text": f"😕 {msg}"}
+            # 调用失败（网络等）→ 回退固定清单，保证流程不断
+            return STATE_SELECT_VEHICLE_TYPE, _type_card()
         # 默认：渲染问询卡（保持 state=START）
         return STATE_START, _entry_card()
 
