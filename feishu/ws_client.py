@@ -71,8 +71,11 @@ def _extract_card_action(data: P2CardActionTrigger):
     op = data.event.operator
     open_id = getattr(op, "open_id", "") or ""
     action = data.event.action
-    # 2026-06-25 debug：form submit 排查 — log 完整 action 数据
-    if getattr(action, "tag", None) in ("form", "select_static"):
+    _form_value = getattr(action, "form_value", None)
+    _input_value = getattr(action, "input_value", None)
+    # 2026-06-25 debug：form submit 排查 — log 完整 action 数据（form_submit 按钮
+    # 的 tag 是 "button"，故不能只按 tag 过滤，凡带 form_value/input_value 都打）
+    if getattr(action, "tag", None) in ("form", "select_static") or _form_value or _input_value:
         import logging
         _dbg = logging.getLogger("feishu.ws_client")
         _dbg.info(
@@ -80,7 +83,7 @@ def _extract_card_action(data: P2CardActionTrigger):
             "action.form_value=%r action.input_value=%r action.option=%r action.options=%r",
             open_id, getattr(action, "tag", None),
             getattr(action, "value", None), getattr(action, "name", None),
-            getattr(action, "form_value", None), getattr(action, "input_value", None),
+            _form_value, _input_value,
             getattr(action, "option", None), getattr(action, "options", None),
         )
     value = getattr(action, "value", None) or {}
@@ -90,45 +93,37 @@ def _extract_card_action(data: P2CardActionTrigger):
     if action_name and isinstance(value, dict) and not value.get("action"):
         value = {**value, "action": action_name}
     if isinstance(value, dict) and not value.get("value"):
-        # 2026-06-18 select_static + form 兼容：lark-oapi CallBackAction 字段
-        # (lark_oapi/event/callback/model/p2_card_action_trigger.py:38-66):
-        #   option:     Optional[str]            ← 单选 select_static 选中 key
-        #   options:    Optional[List[str]]      ← 多选 select_static 选中 keys
-        #   form_value: Optional[Dict[str, Any]] ← Card 2.0 form aggregate submit
-        #   input_value: Optional[str]          ← Card 2.0 input/textarea submit 文本
-        #   tag:        Optional[str]            ← 触发元素 tag（"button" / "form" / "select_static"）
-        # 优先级：input_value (str) > form_value 第一个 string > option > options[0]
-        # 2026-06-25 fix：input_value 是 input 元素的提交文本（单字段），form_value 是
-        # form 聚合提交（Dict）。单字段 input 提交时 input_value 有值但 form_value 为 None。
-        # 2026-06-24 review fix：只对 tag 明确是 form/select 的 action 注入 value；
-        # 普通 button (tag='button' 无 value 字段是合法的，比如 cancel_flow) 不动，
-        # 避免被 option/form_value 污染成无效文本。
-        if action_tag in ("form", "select_static"):
-            # 1) input_value str：input 元素的提交文本（最高优先级）
-            input_value = getattr(action, "input_value", None)
-            if isinstance(input_value, str) and input_value:
-                value = {**value, "value": input_value}
-            # 2) form_value Dict：取第一个 string 值（如 {"task_input": "MFF"} → "MFF"）
-            if not value.get("value"):
-                form_value = getattr(action, "form_value", None)
-                if isinstance(form_value, dict) and form_value:
-                    for v in form_value.values():
-                        if isinstance(v, str) and v:
-                            value = {**value, "value": v}
-                            break
-            # 3) 还没 value → 退回 select_static option 路径
-            if not value.get("value"):
-                def _first_str(*names):
-                    for n in names:
-                        v = getattr(action, n, None)
-                        if isinstance(v, str) and v:
-                            return v
-                        if isinstance(v, list) and v and isinstance(v[0], str):
-                            return v[0]
-                    return None
-                option = _first_str("option", "options")
-                if option:
-                    value = {**value, "value": option}
+        # lark-oapi CallBackAction 字段：
+        #   input_value: Optional[str]          ← Card 2.0 input/textarea 提交文本
+        #   form_value:  Optional[Dict[str, Any]] ← Card 2.0 form 聚合提交
+        #   option:      Optional[str]            ← 单选 select_static 选中 key
+        #   options:     Optional[List[str]]      ← 多选 select_static 选中 keys
+        # 2026-06-26 fix：form_submit 按钮的 tag 是 "button"（不是 "form"），之前
+        # 只对 tag∈(form,select_static) 提取 → "其它"自定义输入的任务/地点丢失，
+        # 报"任务名称不能为空"。现改为：input_value/form_value 无论 tag 都提取
+        # （普通 button 这俩字段为 None，不受影响）；option/options 仍限 select_static。
+        # 1) input_value str：input 元素提交文本（最高优先级）
+        if isinstance(_input_value, str) and _input_value:
+            value = {**value, "value": _input_value}
+        # 2) form_value Dict：取第一个 string 值（如 {"task_input": "MFF"} → "MFF"）
+        if not value.get("value") and isinstance(_form_value, dict) and _form_value:
+            for v in _form_value.values():
+                if isinstance(v, str) and v:
+                    value = {**value, "value": v}
+                    break
+        # 3) option/options（仅 select_static / form，避免普通 button 被污染）
+        if not value.get("value") and action_tag in ("form", "select_static"):
+            def _first_str(*names):
+                for n in names:
+                    v = getattr(action, n, None)
+                    if isinstance(v, str) and v:
+                        return v
+                    if isinstance(v, list) and v and isinstance(v[0], str):
+                        return v[0]
+                return None
+            option = _first_str("option", "options")
+            if option:
+                value = {**value, "value": option}
     ctx = getattr(data.event, "context", None)
     chat_id = getattr(ctx, "open_chat_id", "") or ""
     log.info("card_action_received open_id=%s chat_id=%s value_keys=%s",

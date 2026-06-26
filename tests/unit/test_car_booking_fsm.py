@@ -358,37 +358,20 @@ def test_advance_input_location_saves_and_goes_to_confirm():
 
 # ── INPUT_TASK / INPUT_LOCATION 「其它」按钮路径 ────────────────────────────
 
-def test_advance_input_task_other_renders_form_card():
-    """INPUT_TASK 收「其它」marker → 渲染 form+input 卡（Card 2.0）。
+def test_advance_input_task_other_prompts_text_input():
+    """INPUT_TASK 收「其它」marker → 提示在对话框直接输入（不再用脆弱的 Card 2.0 form）。
 
-    2026-06-18 改：原纯文本提示改为 Card 2.0 form 组件（input + 确认按钮），
-    用户在卡片输入框里输入 + 点确认，form_value 进 fsm.advance。
+    2026-06-26 改：飞书 form_submit 回调 tag=button、文本提取脆弱（曾报"任务名称不能为空"）
+    → 改成纯文本提示，用户在对话框输入即走稳定自由文本路径。
     """
     from bot.car_booking_fsm import _FSM_TASK_OTHER_MARKER
     car_state.save("ou_task_other", state="INPUT_TASK", vehicle_no="PNV000",
                    time_range_start="2026-06-17 14:00",
                    time_range_end="2026-06-17 16:00")
     new_state, resp = advance("ou_task_other", _FSM_TASK_OTHER_MARKER)
-    assert new_state == "INPUT_TASK"  # 保持状态
-    assert "card" in resp  # form 卡
-    card = resp["card"]
-    # Card 2.0 schema + body 包装
-    assert card.get("schema") == "2.0"
-    form = next((e for e in card["body"]["elements"]
-                 if e.get("tag") == "form"), None)
-    assert form is not None, "form 元素必须存在"
-    # form 内含 input + button
-    tags = [e.get("tag") for e in form["elements"]]
-    assert "input" in tags
-    assert "button" in tags
-    # input name 应该是 task_input
-    input_el = next(e for e in form["elements"] if e.get("tag") == "input")
-    assert input_el["name"] == "task_input"
-    # 2026-06-25 fix：Card 2.0 form submit button 用 name + action_type="form_submit"
-    # （不是 value.action），lark 拒绝缺字段的形式（code: 200673）
-    btn = next(e for e in form["elements"] if e.get("tag") == "button")
-    assert btn.get("action_type") == "form_submit"
-    assert btn["name"] == "fsm_input_task_form"
+    assert new_state == "INPUT_TASK"  # 保持状态等用户输入
+    assert "card" not in resp  # 不再渲染 form 卡
+    assert "输入任务名称" in resp.get("text", "")
     car_state.clear("ou_task_other")
 
 
@@ -406,8 +389,8 @@ def test_advance_input_task_form_submit_saves():
     car_state.clear("ou_task_other2")
 
 
-def test_advance_input_location_other_renders_form_card():
-    """INPUT_LOCATION 收「其它」marker → 渲染 form+input 卡。"""
+def test_advance_input_location_other_prompts_text_input():
+    """INPUT_LOCATION 收「其它」marker → 提示在对话框直接输入（不再用 Card 2.0 form）。"""
     from bot.car_booking_fsm import _FSM_LOCATION_OTHER_MARKER
     car_state.save("ou_loc_other", state="INPUT_LOCATION", vehicle_no="PNV000",
                    task_name="MFF调试",
@@ -415,18 +398,8 @@ def test_advance_input_location_other_renders_form_card():
                    time_range_end="2026-06-17 16:00")
     new_state, resp = advance("ou_loc_other", _FSM_LOCATION_OTHER_MARKER)
     assert new_state == "INPUT_LOCATION"  # 保持状态
-    assert "card" in resp
-    card = resp["card"]
-    assert card.get("schema") == "2.0"
-    form = next((e for e in card["body"]["elements"]
-                 if e.get("tag") == "form"), None)
-    assert form is not None
-    input_el = next(e for e in form["elements"] if e.get("tag") == "input")
-    assert input_el["name"] == "location_input"
-    # 2026-06-25 fix：Card 2.0 form submit button 用 name + action_type="form_submit"
-    btn = next(e for e in form["elements"] if e.get("tag") == "button")
-    assert btn.get("action_type") == "form_submit"
-    assert btn["name"] == "fsm_input_location_form"
+    assert "card" not in resp
+    assert "输入测试地点" in resp.get("text", "")
     car_state.clear("ou_loc_other")
 
 

@@ -1041,15 +1041,11 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 2026-06-18 form UX：用户点「其它」按钮 → 渲染 form+input 卡，
         # 用户在卡片输入框里输入文本后点确认按钮，form_value[input_value] 走 fsm.advance。
         if text == _FSM_TASK_OTHER_MARKER:
+            # 2026-06-26：不再用 Card 2.0 form（飞书 form_submit 回调 tag=button，
+            # 文本提取脆弱）→ 直接提示在对话框输入，走稳定的自由文本路径。
             return STATE_INPUT_TASK, {
-                "text": "📝 请在下方输入框输入任务名称：",
-                "card": _input_form_card(
-                    title="✍️ **输入任务名称**\n\n💡 可中文/英文（如「MFF 调试」「路测 03 园区」）",
-                    placeholder="输入任务名称...",
-                    button_text="✅ 确认",
-                    action="fsm_input_task_form",
-                    input_name="task_input",
-                ),
+                "text": ("✍️ **请直接在对话框输入任务名称**\n\n"
+                         "💡 中文/英文均可（如「MFF 调试」「路测 03 园区」）"),
             }
         task = _llm_extract_task(text)["task_name"]
         if not task:
@@ -1080,14 +1076,8 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
         # 2026-06-18 form UX：用户点「其它」按钮 → 渲染 form+input 卡。
         if text == _FSM_LOCATION_OTHER_MARKER:
             return STATE_INPUT_LOCATION, {
-                "text": "📍 请在下方输入框输入测试地点：",
-                "card": _input_form_card(
-                    title="✍️ **输入测试地点**\n\n💡 中文/英文均可（如「园区A3 号楼」「上海临港」）",
-                    placeholder="输入测试地点...",
-                    button_text="✅ 确认",
-                    action="fsm_input_location_form",
-                    input_name="location_input",
-                ),
+                "text": ("✍️ **请直接在对话框输入测试地点**\n\n"
+                         "💡 中文/英文均可（如「园区A3 号楼」「上海临港」）"),
             }
         loc = _llm_extract_location(text)["location"]
         if not loc:
