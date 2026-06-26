@@ -62,8 +62,8 @@ VEHICLE_TYPE_BUTTONS = [
     "CM0", "CM2", "CT1", "CT2",
     # D-系列 (Dcar)
     "DM0", "DM1", "DM2",
-    # 大F车
-    "?Fcar",
+    # 大F车（后端值用「大F车」——之前的「?Fcar」是「大F车」的乱码，二者查同一批车）
+    "大F车",
 ]
 CHIP_BUTTONS = ["Xavier", "ADCU", "Orin", "Thor"]
 ENTRY_MODE_BUTTONS = ["已知编号", "帮我查"]
@@ -169,21 +169,21 @@ def _entry_card() -> dict:
     ])
 
 
-def _select_card(title: str, placeholder: str, options: list, action: str) -> dict:
+def _select_card(title: str, placeholder: str, options: list, action: str,
+                 display_map: dict | None = None) -> dict:
     """通用 select_static 卡片骨架（Card 2.0 schema）。
 
-    options 是 list[str]（选项的 value 与 text 同名）。lark-oapi CardBuilder.select
-    （verified: channel/card/builder.py:188-208）输出也是这种结构，**不**带
-    initial_option 字段（Card 2.0 select_static 不支持）。value 字段携带
-    action 标识，callback 时由 feishu/ws_client._extract_card_action 归一化
-    option → value['value']。
+    options 是 list[str]（选项的 **value**）。``display_map`` 可让某些 option 的**显示文本**
+    与 value 不同（如车型 value="大F车"显示"大F车"；时段 value=start 显示"start ~ end"）。
+    callback 回来的是 value（不是显示文本），由 feishu/ws_client 归一化到 value['value']。
     """
+    display_map = display_map or {}
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md", "content": title}},
         {"tag": "select_static",
          "placeholder": {"tag": "plain_text", "content": placeholder},
          "options": [
-             {"text": {"tag": "plain_text", "content": o}, "value": o}
+             {"text": {"tag": "plain_text", "content": display_map.get(o, o)}, "value": o}
              for o in options
          ],
          "value": {"action": action}}
@@ -247,8 +247,7 @@ def _chip_card(vehicle_type_detail: str = "") -> dict:
     """
     detail_suffix = f" {vehicle_type_detail}" if vehicle_type_detail else ""
     return _select_card(
-        (f"**🧠 第 2/8 步：选择芯片平台**（已选车型{detail_suffix}）\n\n"
-         "🔧 芯片平台是车上的计算单元（Xavier/Orin 较新算力强；ADCU/Thor 专用场景）\n"),
+        f"**🧠 第 2/8 步：选择芯片平台**（已选车型{detail_suffix}）",
         "点击选择芯片",
         CHIP_BUTTONS,
         "fsm_select_chip",
@@ -264,11 +263,9 @@ def _duration_card(pending) -> dict:
     return _card_wrap([
         {"tag": "div", "text": {"tag": "lark_md",
          "content": (f"**⏱️ 第 3/8 步：选择用车时长**\n\n"
-                     f"📌 当前：**{_format_duration(cur)}**\n"
-                     f"📏 范围：{_format_duration(MIN_DURATION_MINUTES)} ~ {_format_duration(MAX_DURATION_MINUTES)} "
-                     f"（按 {DURATION_STEP_MINUTES} 分钟步进）\n"
-                     f"💡 用 [−30 分] / [+30 分] 调整时长，默认 30 分钟\n"
-                     f"✅ 调好后点 [确认] 进入下一步")}},
+                     f"当前：**{_format_duration(cur)}**"
+                     f"（范围 {_format_duration(MIN_DURATION_MINUTES)} ~ {_format_duration(MAX_DURATION_MINUTES)}）\n"
+                     f"用 [−30 分] / [+30 分] 调整，调好点 [确认] 进入下一步")}},
         _button_row([
             {"tag": "button", "type": "default",
              "text": {"tag": "plain_text", "content": "−30 分"},
@@ -917,17 +914,20 @@ def _advance_inner(user_id: str, text: str, current_state: str, pending) -> tupl
             # 2026-06-18：6+ 个时段改用 select_static 下拉（移动端友好，避免横排
             # 按钮在窄屏上溢出）。option 文本是 "MM-DD HH:MM ~ HH:MM"，value 是
             # 完整 start_time 字符串（card_action_handler 不再需要特殊翻译）。
+            # 缓存候选时段：用户点下拉后 advance 要按 start time 反查同一批 slots
+            # （不缓存的话时间流逝后 _match_slots 会重算成不同时段 → 选中的时间匹配不上）。
+            car_state.save(user_id, last_slots=slots)
             return STATE_DURATION_CONFIRM, {
                 "text": (f"**⏰ 第 5/8 步：选择用车时段**\n\n"
                          f"📋 已选车辆：**{pending_dc.vehicle_no}**\n"
                          f"⏱️ 用车时长：{_format_duration(pending_dc.duration_minutes)}\n"
-                         f"💡 下方下拉显示从「现在 + 30 分钟」起的 {len(slots)} 个候选时段\n"
-                         f"   选中后时段会标在调度系统里"),
+                         f"💡 下方下拉是从「现在 + 30 分钟」起的 {len(slots)} 个候选时段，选一个即可"),
                 "card": _select_card(
                     title=f"⏰ 第 5/8 步：选择时段（{pending_dc.vehicle_no}）",
                     placeholder="点击选择时段",
                     options=[s["start"] for s in slots],
                     action="fsm_pick_slot",
+                    display_map={s["start"]: s.get("label", s["start"]) for s in slots},
                 ),
             }
         # 1) 如果 vehicle_no 还没定（用户刚到 DURATION_CONFIRM）→ 解析选车

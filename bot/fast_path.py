@@ -93,13 +93,17 @@ def run_tool(tool_name: str, user_id: str, role: int, args: dict | None = None) 
         if tool_name == "fetch_available_vehicles":
             return _render_vehicles(parsed, args, user_id)
         if tool_name == "fetch_user_reservation":
-            n = len(parsed) if isinstance(parsed, list) else 0
+            # 默认只显示「待审批」「已批准」（隐藏已取消/已驳回/已归还等历史，减少干扰）
+            recs = [r for r in parsed if isinstance(r, dict)
+                    and r.get("status") in ("待审批", "已批准")] if isinstance(parsed, list) else []
             card = car_card_builder.build_records_card(
-                parsed, title=f"我的预约（共 {n} 条）", show_cancel=True)
+                recs, title=f"我的预约（共 {len(recs)} 条）", show_cancel=True)
             return {"card": card, "text": None, "blocked": False}
         if tool_name == "fetch_user_approval":
-            n = len(parsed) if isinstance(parsed, list) else 0
-            card = car_card_builder.build_records_card(parsed, title=f"我的待审批（共 {n} 条）")
+            # 待审批列表只列真正「待审批」的（已处理的不再显示）
+            recs = [r for r in parsed if isinstance(r, dict)
+                    and r.get("status") == "待审批"] if isinstance(parsed, list) else []
+            card = car_card_builder.build_records_card(recs, title=f"我的待审批（共 {len(recs)} 条）")
             return {"card": card, "text": None, "blocked": False}
 
         return {"text": "📋 查询成功。", "blocked": False, "card": None}

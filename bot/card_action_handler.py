@@ -156,8 +156,12 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
     action = value.get("action", "")
 
     if action == "fsm_pick_slot":
-        slot_idx = value.get("slot_idx", 1)
-        text = str(slot_idx)
+        # 两种来源：① 下拉选时段 → value['value'] 是选中的完整 start time 字符串
+        #          ② 按钮选时段 → value['slot_idx'] 是 1-based 序号
+        # 2026-06-26 修：之前只读 slot_idx（默认 1），下拉选哪个时段都按第 1 个 →
+        # 用户选 18:00 却被订成 14:00。优先用 value['value']（完整时间，FSM 按时间精确匹配）。
+        picked = value.get("value")
+        text = str(picked) if picked else str(value.get("slot_idx", 1))
     elif action in _FSM_MARKERS:
         text = _FSM_MARKERS[action]
     else:
@@ -195,6 +199,9 @@ def _handle_fsm_button(open_id: str, chat_id: str, value: dict
                 items = []
             if not isinstance(items, list):
                 items = []
+            # 只显示待审批/已批准（与「我的预约」fast-path 一致，隐藏已取消等历史）
+            items = [r for r in items if isinstance(r, dict)
+                     and r.get("status") in ("待审批", "已批准")]
             n = len(items)
             # 2026-06-24 review fix：渲染 Card 2.0 卡（之前返 {"text":...} 字典
             # 让 Lark 显示空白 toast）。复用 _build_records_card 保证 LLM agent 路径

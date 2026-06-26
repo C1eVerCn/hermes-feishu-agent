@@ -173,3 +173,21 @@ def test_cancel_flow_button_clears_state():
     toast, card = card_action_handler.handle("ou_act", {"action": "cancel_flow"})
     assert car_state.get("ou_act") is None
     assert "已取消" in toast
+
+
+def test_fsm_pick_slot_dropdown_uses_picked_time():
+    """下拉选时段：value['value']=选中的 start time → 订到那个时段（修"总是订第1个"的 bug）。"""
+    car_state.clear("ou_slot")
+    slots = [
+        {"start": "2026-06-26 14:00", "end": "2026-06-26 15:00", "label": "06-26 14:00 ~ 15:00"},
+        {"start": "2026-06-26 18:00", "end": "2026-06-26 19:00", "label": "06-26 18:00 ~ 19:00"},
+    ]
+    car_state.save("ou_slot", state="DURATION_CONFIRM", intent="booking",
+                   vehicle_no="PNV001", duration_minutes=60, last_slots=slots)
+    # 模拟下拉选了第 2 个（18:00），ws_client 把 option 归一化到 value['value']
+    card_action_handler.handle("ou_slot",
+                               {"action": "fsm_pick_slot", "value": "2026-06-26 18:00"})
+    p = car_state.get("ou_slot")
+    assert p.start_time == "2026-06-26 18:00", f"应订 18:00，实得 {p.start_time}"
+    assert p.end_time == "2026-06-26 19:00"
+    car_state.clear("ou_slot")
