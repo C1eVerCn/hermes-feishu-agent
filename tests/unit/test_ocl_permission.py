@@ -37,10 +37,12 @@ def test_tool_min_role_query_tools():
 
 
 def test_tool_min_role_booking_tools():
- assert perm.TOOL_MIN_ROLE["single_vehicle_reservation"] ==1  # 业务下单（commit） — 实际 LLM 不可见，仅 card_action_handler 调用
- assert perm.TOOL_MIN_ROLE["_commit_vehicle_reservation"] ==1
+ assert perm.TOOL_MIN_ROLE["_dry_run_vehicle_reservation"] ==1  # LLM 只见 dry_run
+ assert perm.TOOL_MIN_ROLE["_commit_vehicle_reservation"] ==1  # commit 仅 card/FSM 触发
  assert perm.TOOL_MIN_ROLE["cancel_vehicle_reservation"] ==1
  assert perm.TOOL_MIN_ROLE["return_vehicle"] ==1
+ # 后端 MCP 名（如 single_vehicle_reservation）不是 LLM-facing 注册名 → 不应在门控表里
+ assert "single_vehicle_reservation" not in perm.TOOL_MIN_ROLE
 
 
 def test_tool_min_role_approval_tools_role2():
@@ -55,7 +57,7 @@ def test_tool_min_role_assistants():
 
 # 核心门控逻辑
 def test_role1_user_can_use_level1_tools():
- for t in ["fetch_available_vehicles", "single_vehicle_reservation",
+ for t in ["fetch_available_vehicles", "_dry_run_vehicle_reservation",
           "cancel_vehicle_reservation", "return_vehicle",
           "fetch_user_reservation", "get_user_context",
           "get_common_dictionary"]:

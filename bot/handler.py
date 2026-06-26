@@ -37,7 +37,6 @@ from bot.agent_pool import agent_pool
 from bot import car_state
 from bot import intent
 from bot import intent_router
-from bot import backend_role
 from bot import replies
 from bot import fast_path
 from bot import car_booking_fsm
@@ -175,10 +174,13 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
 def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
     """auto-register + 角色解析 + email/name/mobile 回填。返回 (role, email, name, mobile)。
 
-    角色来源（2026-06-26 改）：**后端 fmp 是事实源**——用 email 查 get_user_context 的 role
-    同步进 identity_map（OCL 仍读 identity_map）。后端查不到/失败 → 保持原 identity_map /
-    auto-in-scope 行为。最后叠加 OCL_ADMIN_USER_IDS 白名单（bot 级管理员命令兜底）。
-    手机号是第二识别符（邮箱为主、上游仍按 emailAddress 鉴权）。
+    角色来源：**identity_map.json 是唯一事实源**（管理员用「设置角色」维护）。
+    背景（2026-06-26）：后端 fmp 0617 分支把 RBAC 重构成多角色（sys_user_role + RoleHelper），
+    ``get_user_context`` 返回的 Employee **不再带 role 字段**——故无法再从后端同步角色（且按
+    用户要求「不动 MCP」，后端也没有暴露角色的开放接口）。因此回归主设计：identity_map 粗粒度
+    门控、后端按 emailAddress 细粒度校验，两道闸独立。可见范围内未建档用户默认普通用户(role=1)。
+    最后叠加 OCL_ADMIN_USER_IDS 白名单（bot 级管理员命令兜底）。手机号是第二识别符（邮箱为主、
+    上游仍按 emailAddress 鉴权）。
     """
     admin = get_identity_admin()
     email = identity.email_of(user_id)
@@ -196,14 +198,8 @@ def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
                 mobile=mobile or existing.get("mobile", ""),
                 operator="auto_email_sync",
             )
-        # ★ 后端角色同步（事实源）：fmp get_user_context 的 role 写进 identity_map
-        b_role = backend_role.role_of_backend(email) if email else None
-        if b_role is not None:
-            if admin.get_role(user_id) != b_role:
-                admin.set_role(user_id, b_role, operator="backend_sync",
-                               note=f"synced from fmp get_user_context role={b_role}")
-        elif admin.get_role(user_id) == 0:
-            # 后端不认识 + 本地 0 → 可见范围内默认普通用户（保持原行为）
+        # 可见范围内未建档用户（本地 role=0）默认普通用户；调度员/管理员由「设置角色」显式指派。
+        if admin.get_role(user_id) == 0:
             admin.set_role(user_id, 1, operator="auto_in_scope",
                            note=f"in-visible-scope default; email={'yes' if email else 'none'}")
     role = admin.get_role(user_id)

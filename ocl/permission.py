@@ -26,20 +26,21 @@ log = logging.getLogger(__name__)
 # 车辆预约域（car_tools/）；上一代台架预约（bench_tools/）和 VLM 精标（vlm_tools/）
 # 已于 2026-06-16 业务域合并时彻底删除。
 TOOL_MIN_ROLE: dict[str, int] = {
-    # ── 业务工具（7 个） ──
+    # 键 == car_tools/register.py 注册给 LLM 的工具名（10 个，一一对应；
+    # 后端 MCP 的 @Tool 名如 single_vehicle_reservation 不在此表——那不是 LLM-facing 名）。
+    # ── 查询 / 变更业务工具 ──
     "fetch_available_vehicles":       1,
-    "single_vehicle_reservation":     1,
     "cancel_vehicle_reservation":     1,
     "approval_vehicle_reservation":   2,   # 仅调度员/管理员
     "return_vehicle":                 1,
     "fetch_user_reservation":         1,
     "fetch_user_approval":            2,   # 仅调度员/管理员
 
-    # ── 助手（2 个） ──
+    # ── 助手 ──
     "get_user_context":               1,
     "get_common_dictionary":          1,
 
-    # ── 内部回调工具（LLM 不可见，仅 card_action_handler 调） ──
+    # ── 预约下单（LLM 只见 _dry_run；_commit 对 LLM 不可见，仅 card/FSM 触发）──
     "_dry_run_vehicle_reservation":   1,
     "_commit_vehicle_reservation":    1,
 }
