@@ -47,7 +47,7 @@ def test_auto_register_does_not_overwrite_existing(admin):
 
 def test_set_role_validates_range(admin):
     admin.auto_register("ou_alice")
-    ok, msg = admin.set_role("ou_alice", 5)
+    ok, msg = admin.set_role("ou_alice", 6)   # 6 越界（fmp 内置角色到 5）
     assert ok is False
     assert "invalid_role" in msg
     ok, msg = admin.set_role("ou_alice", -1)
@@ -57,7 +57,7 @@ def test_set_role_validates_range(admin):
 
 def test_set_role_valid_values(admin):
     admin.auto_register("ou_alice")
-    for r in (0, 1, 2, 3):
+    for r in (0, 1, 2, 3, 4, 5):   # 与 fmp sys_role 对齐：含司机(4)/组管理员(5)
         ok, msg = admin.set_role("ou_alice", r, operator="admin_root")
         assert ok is True
         assert admin.get_role("ou_alice") == r
@@ -193,11 +193,13 @@ def test_v1_format_migrated_on_load(tmp_path):
 
 
 def test_role_names_constant():
-    assert ROLE_NAMES[1] == "普通用户"
+    assert ROLE_NAMES[1] == "工程师"
     assert ROLE_NAMES[2] == "调度员"
     assert ROLE_NAMES[3] == "管理员"
+    assert ROLE_NAMES[4] == "司机"
+    assert ROLE_NAMES[5] == "组管理员"
     assert ROLE_NAMES[0] == "待审核"
-    assert set(ALLOWED_ROLES) == {0, 1, 2, 3}
+    assert set(ALLOWED_ROLES) == {0, 1, 2, 3, 4, 5}
 
 
 def test_get_admin_singleton():

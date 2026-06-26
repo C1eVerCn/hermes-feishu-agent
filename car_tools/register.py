@@ -1,7 +1,7 @@
 """注册车辆预约业务工具（7 业务 + 2 助手 + 1 内部 dry_run + 1 内部 commit）到 hermes registry。
 
 所有 handler 用 ocl.tool_guard.guarded() 包裹 → L2 兜底权限校验。
-L1 拦截由 hermes_plugins/feishu_acl 钩子负责（参见 ocl.permission.TOOL_MIN_ROLE）。
+L1 拦截由 hermes_plugins/feishu_acl 钩子负责（参见 ocl.permission.ROLE_TOOLS / is_tool_permitted）。
 
 ⚠️ emailAddress / openId / mobile **不**出现在任何 schema 字段中（结构性防御）
 —— 由服务端从 contextvars 注入，LLM 永远看不到。

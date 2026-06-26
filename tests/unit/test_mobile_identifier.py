@@ -123,6 +123,21 @@ def test_admin_view_user_by_mobile(monkeypatch, tmp_path):
     assert "孙七" in out and "13500135000" in out and "调度员" in out
 
 
+def test_admin_view_user_list_shows_driver_and_group_manager(monkeypatch, tmp_path):
+    """查看用户全量列表必须显示司机(4)/组管理员(5)——回归：旧渲染循环只列 0-3 会静默丢弃。"""
+    from bot import replies, identity_admin
+    a = IdentityAdmin(str(tmp_path / "m45.json"), str(tmp_path / "a45.jsonl"))
+    a.auto_register("ou_drv", email="drv@x.com", name="司机张")
+    a.set_role("ou_drv", 4, operator="test")
+    a.auto_register("ou_gm", email="gm@x.com", name="组管钱")
+    a.set_role("ou_gm", 5, operator="test")
+    monkeypatch.setattr(identity_admin, "_singleton", a)
+    out = replies._format_user_list(None)
+    assert "共 2 人" in out          # 表头计数
+    assert "司机" in out and "司机张" in out      # role 4 段落真实输出
+    assert "组管理员" in out and "组管钱" in out   # role 5 段落真实输出
+
+
 def test_admin_set_mobile_command(monkeypatch, tmp_path):
     from bot import replies, identity_admin
     a = IdentityAdmin(str(tmp_path / "m3.json"), str(tmp_path / "a3.jsonl"))

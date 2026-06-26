@@ -17,12 +17,12 @@ data/identity_map.json v2 schema:
 来源说明：
 - auto_first_contact: 首次发消息时自动建档（role=0 pending）
 - manual: 管理员手动改 identity_map.json
-- admin_assign: 管理员在飞书发"设置角色 <open_id> <1|2|3>"
+- admin_assign: 管理员在飞书发"设置角色 <open_id> <1-5>"（与 fmp sys_role 对齐）
 - feishu_org_sync: 启动时拉全组织成员批量建档
 
 安全铁律（不可变）：
 1. emailAddress / API key 永不落盘（email 仅作"人读"显示用）
-2. role 数值范围必须 ∈ {0, 1, 2, 3}
+2. role 数值范围必须 ∈ {0,1,2,3,4,5}（与 fmp sys_role 对齐：0 待审核 /1 工程师 /2 调度员 /3 管理员 /4 司机 /5 组管理员）
 3. set_role 必须有 operator open_id（审计）
 4. 任何写盘操作必须落 audit（data/identity_audit.jsonl）
 """
@@ -40,9 +40,9 @@ from infra.json_store import JsonStore
 log = logging.getLogger(__name__)
 _lock = threading.Lock()
 
-# role 数值白名单
-ALLOWED_ROLES = (0, 1, 2, 3)
-ROLE_NAMES = {0: "待审核", 1: "普通用户", 2: "调度员", 3: "管理员"}
+# role 数值白名单（与 fmp 后端 sys_role 对齐：1 工程师 / 2 调度员 / 3 管理员 / 4 司机 / 5 组管理员）
+ALLOWED_ROLES = (0, 1, 2, 3, 4, 5)
+ROLE_NAMES = {0: "待审核", 1: "工程师", 2: "调度员", 3: "管理员", 4: "司机", 5: "组管理员"}
 
 DEFAULT_DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "data"

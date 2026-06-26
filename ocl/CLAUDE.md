@@ -9,7 +9,7 @@ before they reach the user. Single entry point: `pipeline.apply(response, user_i
 - `format_control.py` — strip whitespace, collapse blank lines, detect empty responses
 - `content_filter.py` — keyword/regex hard-blocks (political, key leaks) + warn-only patterns
 - `identity.py`       — open_id → {email, name, role} map; JSON persistence; `set_role` for admins; `build_caller_identity(openid) → CallerIdentity`
-- `permission.py`     — role-based tool ACL (`TOOL_MIN_ROLE`); `is_tool_permitted(open_id, tool)`（车辆预约域）
+- `permission.py`     — role-based tool ACL (`ROLE_TOOLS` / `role_allows` / `is_tool_permitted`)（车辆预约域；角色与 fmp sys_role 对齐 1~5）
 - `tool_guard.py`     — contextvars-based CallerIdentity 注入；`guarded()` wraps handlers (Layer 2 fallback)
 - `length_limiter.py` — truncate at `OCL_MAX_OUTPUT_CHARS`, preserve sentence boundary
 - `session_map.py`    — session_id → user_id mapping for hermes plugin (Layer 1) lookup
@@ -20,13 +20,17 @@ before they reach the user. Single entry point: `pipeline.apply(response, user_i
 ## Permission / role model
 
 Roles come from `data/identity_map.json` (open_id → {email, name, role}); `role_of`
-returns 0 for non-platform users. OCL gates each tool by a minimum role:
+returns 0 for non-platform users. Roles align with fmp backend RBAC (`sys_role`).
+OCL gates each tool by an explicit per-role tool set (`ROLE_TOOLS`), **not** a linear
+`role>=min_role` — fmp's 5 roles are non-linear (driver(4) has fewer perms than
+engineer(1); group_manager(5) ≈ dispatcher, not admin):
 
-| Min role | Tools |
-|----------|-------|
-| 1 普通用户 | fetch_available_vehicles, _dry_run_vehicle_reservation, _commit_vehicle_reservation, cancel_vehicle_reservation, return_vehicle, fetch_user_reservation, get_user_context, get_common_dictionary |
-| 2 调度员   | approval_vehicle_reservation, fetch_user_approval |
-| 3 管理员   | （以上全部；未来跨组/系统级操作） |
+| Role | Tools (== car_tools/register.py registered names) |
+|------|-------|
+| 1 工程师 | fetch_available_vehicles, _dry_run_vehicle_reservation, _commit_vehicle_reservation, cancel_vehicle_reservation, return_vehicle, fetch_user_reservation, get_user_context, get_common_dictionary |
+| 2 调度员 / 5 组管理员 | 工程师全部 + approval_vehicle_reservation, fetch_user_approval |
+| 3 管理员   | （全部） |
+| 4 司机     | get_user_context, get_common_dictionary（仅助手；fmp 司机无约车菜单） |
 
 OCL is the **coarse** gate (can this role call this tool). Fine-grained rules
 (same-group, reservation status, time validity) are enforced by the MCP server via
@@ -35,7 +39,8 @@ OCL is the **coarse** gate (can this role call this tool). Fine-grained rules
 ## Identity & role assignment
 
 `data/identity_map.json` is gitignored (see `.example`). Admins assign roles in Feishu
-with `设置角色 <open_id> <1|2|3>` → `identity.set_role`. No self-service application flow.
+with `设置角色 <open_id> <1-5>` → `identity.set_role` (whitelist `ALLOWED_ROLES`).
+fmp custom group-roles (e.g. sys_role.id=100) collapse to role 5 here. No self-service flow.
 `emailAddress` for every MCP call is injected from the current user's open_id via
 `tool_guard.set_current_caller(CallerIdentity(...))`; it is never an LLM-facing tool argument.
 

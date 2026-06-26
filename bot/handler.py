@@ -178,7 +178,7 @@ def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
     背景（2026-06-26）：后端 fmp 0617 分支把 RBAC 重构成多角色（sys_user_role + RoleHelper），
     ``get_user_context`` 返回的 Employee **不再带 role 字段**——故无法再从后端同步角色（且按
     用户要求「不动 MCP」，后端也没有暴露角色的开放接口）。因此回归主设计：identity_map 粗粒度
-    门控、后端按 emailAddress 细粒度校验，两道闸独立。可见范围内未建档用户默认普通用户(role=1)。
+    门控、后端按 emailAddress 细粒度校验，两道闸独立。可见范围内未建档用户默认工程师(role=1)。
     最后叠加 OCL_ADMIN_USER_IDS 白名单（bot 级管理员命令兜底）。手机号是第二识别符（邮箱为主、
     上游仍按 emailAddress 鉴权）。
     """
@@ -198,7 +198,7 @@ def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
                 mobile=mobile or existing.get("mobile", ""),
                 operator="auto_email_sync",
             )
-        # 可见范围内未建档用户（本地 role=0）默认普通用户；调度员/管理员由「设置角色」显式指派。
+        # 可见范围内未建档用户（本地 role=0）默认工程师(role=1)；调度员/管理员等由「设置角色」显式指派。
         if admin.get_role(user_id) == 0:
             admin.set_role(user_id, 1, operator="auto_in_scope",
                            note=f"in-visible-scope default; email={'yes' if email else 'none'}")
@@ -258,8 +258,8 @@ def _route_with_llm(chat_id: str, user_id: str, role: int, text: str) -> bool:
         args = fast_path.build_mutation_args("cancel", decision.slots)
         if args is None:
             return False  # 缺车辆编号 → agent 追问
-        from ocl.permission import TOOL_MIN_ROLE
-        if TOOL_MIN_ROLE.get("cancel_vehicle_reservation", 99) > role:
+        from ocl import permission
+        if not permission.role_allows(role, "cancel_vehicle_reservation"):
             return False
         from car_tools import card_builder as _cb
         sender.send_card(chat_id, _cb.build_cancel_confirm_card(decision.slots.get("vehicle_no", "")))

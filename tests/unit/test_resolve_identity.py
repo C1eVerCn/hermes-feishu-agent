@@ -55,6 +55,17 @@ def test_resolve_identity_env_admin_elevates_to_3(fresh_admin, monkeypatch):
     assert role == 3
 
 
+def test_env_admin_elevates_nonlinear_role5(fresh_admin, monkeypatch):
+    """组管理员(5) 在 OCL_ADMIN_USER_IDS 中也应被提到管理员(3)。
+
+    回归：resolve_role_with_env_admin 用 role!=3 而非旧的 role<3——5<3 为假会漏掉，
+    导致组管理员/司机即便在白名单里也提不上管理员。
+    """
+    fresh_admin.set_role("ou_gm", 5, operator="test")
+    monkeypatch.setattr(replies, "admin_ids", lambda: {"ou_gm"})
+    assert replies.resolve_role_with_env_admin(fresh_admin, "ou_gm", 5) == 3
+
+
 def test_resolve_identity_no_email_still_in_scope(fresh_admin, monkeypatch):
     """无 email（飞书没拿到）仍按可见范围默认 role=1，不降级为陌生人。"""
     _stub_feishu(monkeypatch, email="", name="")

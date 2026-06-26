@@ -105,7 +105,7 @@ def test_guarded_handler_passes_when_permitted():
 
 
 def test_guarded_handler_blocks_unknown_tool():
-    """工具名不在 TOOL_MIN_ROLE → 直接拦截。"""
+    """工具名不在 ocl.permission.ALL_TOOLS → 直接拦截。"""
     guard.set_current_caller(guard.CallerIdentity(openid="ou_alice", email="a@b.com"))
     inner = lambda args: "should not run"
     wrapped = guard.guarded("drop_database", inner)
@@ -126,7 +126,7 @@ def test_guarded_blocks_unregistered_user_from_any_tool():
 
 
 def test_guarded_blocks_role1_from_level2_approval_tool():
-    """role=1 用户调 approval_vehicle_reservation（min_role=2）→ 拦截。"""
+    """role=1 工程师调 approval_vehicle_reservation（审批工具，仅 2/3/5）→ 拦截。"""
     guard.set_current_caller(guard.CallerIdentity(openid="ou_alice", email="a@b.com"))
     inner = lambda args: "should not run"
     wrapped = guard.guarded("approval_vehicle_reservation", inner)

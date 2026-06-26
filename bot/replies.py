@@ -33,16 +33,23 @@ _SIMPLE_REPLIES: list[tuple[re.Pattern, str]] = [
 ]
 
 _MY_PERMS = re.compile(r'我的权限|查看.*权限|我的角色')
-_ADMIN_SET_ROLE = re.compile(r'^设置角色\s+(\S+)\s+([123])$')
+_ADMIN_SET_ROLE = re.compile(r'^设置角色\s+(\S+)\s+([1-5])$')
 _ADMIN_SET_MOBILE = re.compile(r'^(?:设置手机|绑定手机)\s+(\S+)\s+([\d\- ]{6,20})$')
 _ADMIN_LIST_USERS = re.compile(r'^查看用户(?:\s+(\S+))?$')
 
-_ROLE_NAME = {0: "非平台用户", 1: "普通用户", 2: "调度员", 3: "管理员"}
-_ROLE_BY_NAME = {"待审核": 0, "非平台用户": 0, "普通用户": 1, "调度员": 2, "管理员": 3}
+# 角色名 / 能力 与 fmp 后端 sys_role 对齐（1 工程师 / 2 调度员 / 3 管理员 / 4 司机 / 5 组管理员）
+_ROLE_NAME = {0: "非平台用户", 1: "工程师", 2: "调度员", 3: "管理员", 4: "司机", 5: "组管理员"}
+_ROLE_BY_NAME = {
+    "待审核": 0, "非平台用户": 0,
+    "工程师": 1, "普通用户": 1,   # 普通用户=工程师别名（兼容旧称）
+    "调度员": 2, "管理员": 3, "司机": 4, "组管理员": 5,
+}
 _ROLE_CAPS = {
     1: "可查询可用车辆、预约/取消/归还车辆、查询自己的预约记录。",
-    2: "在普通用户基础上，可审批本组车辆预约、查询本组待审批列表。",
+    2: "在工程师基础上，可审批本组车辆预约、查询本组待审批列表。",
     3: "拥有全部权限（含跨组审批等系统级操作）。",
+    4: "司机角色：约车/审批流程不对司机开放（如需约车请联系管理员调整角色）。",
+    5: "组管理员：可约车、审批本组车辆预约（车组/人员管理在 Web 端进行）。",
 }
 
 
@@ -65,8 +72,12 @@ def is_admin(user_id: str) -> bool:
 
 
 def resolve_role_with_env_admin(admin, user_id: str, role: int) -> int:
-    """OCL_ADMIN_USER_IDS 中的用户自动提到管理员（role=3）。"""
-    if role < 3 and user_id in admin_ids():
+    """OCL_ADMIN_USER_IDS 中的用户自动提到管理员（role=3）。
+
+    用 ``role != 3`` 而非 ``role < 3``：角色已非线性（司机=4/组管理员=5 数值大于 3 但
+    并非管理员），凡在白名单且尚非管理员者一律提到 3。
+    """
+    if role != 3 and user_id in admin_ids():
         admin.set_role(user_id, 3, operator="ocl_admin_env",
                        note="auto-elevated from OCL_ADMIN_USER_IDS")
         return 3
@@ -84,7 +95,7 @@ def identity_preamble(user_id: str, role: int, name: str) -> str:
         f"{who}\n"
         f"权限范围：{caps}\n"
         "回答涉及「你是谁/我的权限/我能做什么」时，必须依据上述角色，"
-        "不得默认对方是普通用户。\n"
+        "不得默认对方是工程师/普通用户。\n"
         "［领域边界 — 2026-06-25］你是车辆预约管理机器人，**只**处理车辆预约/"
         "审批/归还/记录查询等业务。对股票/天气/纳指/聊天/其他无关问题，"
         "请礼貌拒绝并引导用户：「我仅能帮您处理车辆预约相关需求，请试试约车、"
@@ -110,12 +121,8 @@ def identity_reply(user_id: str) -> str:
         return (f"您当前是【待审核】用户，无平台权限。\n"
                 f"请联系管理员开通，并提供您的 open_id：\n"
                 f"{user_id}")
-    role_name = {1: "普通用户", 2: "调度员", 3: "管理员"}.get(role, "未知")
-    caps = {
-        1: "可查询可用车辆、预约/取消/归还车辆、查询自己的预约记录。",
-        2: "可审批本组车辆预约、查询本组待审批列表。",
-        3: "拥有全部权限（含跨组审批等系统级操作）。",
-    }.get(role, "")
+    role_name = _ROLE_NAME.get(role, "未知")
+    caps = _ROLE_CAPS.get(role, "")
     upgrade_hint = ""
     if role == 1:
         upgrade_hint = ("\n\n💡 如需审批/管理权限：\n"
@@ -124,6 +131,8 @@ def identity_reply(user_id: str) -> str:
                         "  • 注意：MCP 端设置的角色不会自动同步到这里，需要在本系统独立设置")
     elif role == 2:
         upgrade_hint = ("\n\n💡 如需管理员权限：联系现有管理员执行「设置角色 <你的 open_id> 3」")
+    elif role == 4:
+        upgrade_hint = ("\n\n💡 如需约车权限：联系管理员调整角色（设置角色 <你的 open_id> 1）")
     return f"您是【{role_name}】。\n{caps}{upgrade_hint}"
 
 
@@ -182,7 +191,7 @@ def _format_user_list(filter_arg: str | None) -> str:
         return (f"未找到用户或角色「{filter_arg}」。\n"
                 "用法：「查看用户」全部 / 「查看用户 调度员」按角色 / "
                 "「查看用户 ou_xxx」按 open_id / 「查看用户 138xxxx」按手机号 / 邮箱。")
-    by_role: dict[int, list[str]] = {0: [], 1: [], 2: [], 3: []}
+    by_role: dict[int, list[str]] = {}
     for oid, rec in users.items():
         r = int(rec.get("role", 0))
         if role_filter is not None and r != role_filter:
@@ -193,8 +202,11 @@ def _format_user_list(filter_arg: str | None) -> str:
     total = sum(len(v) for v in by_role.values())
     header = f"📋 用户列表（共 {total} 人）" + (f"，筛选：{filter_arg}" if filter_arg else "")
     lines: list[str] = [header]
-    for r in (3, 2, 1, 0):
+    # 展示顺序覆盖全部 6 档（管理员→组管理员→调度员→工程师→司机→待审核）；
+    # 未知角色（如未来扩展）兜底追加，避免静默丢弃用户。
+    display_order = [3, 5, 2, 1, 4, 0]
+    for r in display_order + [r for r in sorted(by_role) if r not in display_order]:
         if by_role.get(r):
-            lines.append(f"\n【{_ROLE_NAME[r]}】{len(by_role[r])} 人")
+            lines.append(f"\n【{_ROLE_NAME.get(r, f'role{r}')}】{len(by_role[r])} 人")
             lines.extend(by_role[r])
     return "\n".join(lines)

@@ -96,7 +96,7 @@ def test_router_identity_reply(setup, monkeypatch):
     monkeypatch.setattr(intent_router, "classify",
                         lambda t: RouteResult(intent="identity", confidence=0.9))
     handler._handle(_event("我在这能干点啥", "m4"))
-    assert setup.texts and "普通用户" in setup.texts[-1]
+    assert setup.texts and "工程师" in setup.texts[-1]
 
 
 def test_router_unknown_falls_to_agent(setup, monkeypatch):

@@ -12,7 +12,7 @@ from typing import Optional
 from bot import car_state
 from bot import intent
 from ocl import identity
-from ocl.permission import TOOL_MIN_ROLE
+from ocl import permission
 from ocl.tool_guard import set_current_caller, CallerIdentity
 from infra.metrics import metrics
 from car_tools import handlers as car_handlers
@@ -56,7 +56,7 @@ def run_tool(tool_name: str, user_id: str, role: int, args: dict | None = None) 
     返回 {"card"|"text"|"blocked"}；权限不足/工具缺失/异常 → None（调用方落 agent）。
     """
     args = args or {}
-    if TOOL_MIN_ROLE.get(tool_name, 99) > role:
+    if not permission.role_allows(role, tool_name):
         return None
 
     set_current_caller(CallerIdentity(
@@ -132,7 +132,7 @@ def run_mutation(intent_name: str, slots: dict, user_id: str, role: int) -> Opti
     args = _build_mutation_args(intent_name, slots)
     if args is None:
         return None  # 缺识别符 → agent
-    if TOOL_MIN_ROLE.get(tool, 99) > role:
+    if not permission.role_allows(role, tool):
         return None  # 权限不足 → agent（L1/L2 也会拦）
 
     set_current_caller(CallerIdentity(
