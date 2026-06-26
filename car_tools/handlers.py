@@ -51,6 +51,20 @@ def _inject_caller(args: dict) -> dict:
     return {**injected, **args}
 
 
+def _fix_mojibake(s: str) -> str:
+    """fmp 返回的部分中文被 UTF-8-当-Latin-1 双重编码（谌一航 → è°Œä¸€èˆª）。
+    尝试还原；仅当还原后含 CJK 才采用（避免误伤本就正常的文本）。"""
+    if not s or not isinstance(s, str):
+        return s
+    try:
+        fixed = s.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+    if any('一' <= c <= '鿿' for c in fixed):
+        return fixed
+    return s
+
+
 def _mutation_failed_message(raw_obj) -> str | None:
     """上游约定（messy）：**成功和失败都可能 data:null**，只靠 message 区分——
     成功如"车辆XXX预约成功，请联系调度员审批…"，失败如"当前用户在该时间段内已存在
@@ -69,7 +83,7 @@ def _mutation_failed_message(raw_obj) -> str | None:
         msg = raw_obj.get("message") or ""
         if "成功" in msg:
             return None
-        return msg or "操作未成功，请稍后重试"
+        return _fix_mojibake(msg) or "操作未成功，请稍后重试"
     return None  # 无 data 键（扁平结构）→ 交给 normalize 处理
 
 

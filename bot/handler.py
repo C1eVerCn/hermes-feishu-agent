@@ -37,6 +37,7 @@ from bot.agent_pool import agent_pool
 from bot import car_state
 from bot import intent
 from bot import intent_router
+from bot import backend_role
 from bot import replies
 from bot import fast_path
 from bot import car_booking_fsm
@@ -170,8 +171,10 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
 def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
     """auto-register + 角色解析 + email/name/mobile 回填。返回 (role, email, name, mobile)。
 
-    手机号是第二识别符（邮箱为主、上游 fmp 仍按 emailAddress 鉴权）。mobile 解析自
-    identity_map（identity.mobile_of）并回写 identity_admin，随 CallerIdentity 透传。
+    角色来源（2026-06-26 改）：**后端 fmp 是事实源**——用 email 查 get_user_context 的 role
+    同步进 identity_map（OCL 仍读 identity_map）。后端查不到/失败 → 保持原 identity_map /
+    auto-in-scope 行为。最后叠加 OCL_ADMIN_USER_IDS 白名单（bot 级管理员命令兜底）。
+    手机号是第二识别符（邮箱为主、上游仍按 emailAddress 鉴权）。
     """
     admin = get_identity_admin()
     email = identity.email_of(user_id)
@@ -180,7 +183,6 @@ def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
     if user_id:
         admin.auto_register(user_id, email=email, name=name, mobile=mobile)
         existing = admin.get(user_id) or {}
-        # email/name/mobile 任一有新值且与档案不一致 → 回写（mobile 也作为识别符落档）
         if (email and existing.get("email") != email) or \
            (mobile and existing.get("mobile") != mobile):
             admin.update_profile(
@@ -190,7 +192,14 @@ def _resolve_identity(user_id: str) -> tuple[int, str, str, str]:
                 mobile=mobile or existing.get("mobile", ""),
                 operator="auto_email_sync",
             )
-        if admin.get_role(user_id) == 0:
+        # ★ 后端角色同步（事实源）：fmp get_user_context 的 role 写进 identity_map
+        b_role = backend_role.role_of_backend(email) if email else None
+        if b_role is not None:
+            if admin.get_role(user_id) != b_role:
+                admin.set_role(user_id, b_role, operator="backend_sync",
+                               note=f"synced from fmp get_user_context role={b_role}")
+        elif admin.get_role(user_id) == 0:
+            # 后端不认识 + 本地 0 → 可见范围内默认普通用户（保持原行为）
             admin.set_role(user_id, 1, operator="auto_in_scope",
                            note=f"in-visible-scope default; email={'yes' if email else 'none'}")
     role = admin.get_role(user_id)
