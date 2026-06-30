@@ -1,4 +1,4 @@
-"""车辆预约业务 handlers（10 个：8 业务 + 2 助手 + 2 内部 dry_run/commit）。
+"""车辆预约业务 handlers（10 个：8 业务 + 2 助手 + 1 dry_run + 1 commit）。
 
 调用路径（对齐参考项目 reservation_agent-test-agent_multigraph）：
   handler(args)
@@ -10,21 +10,111 @@
             → 返回 JSON dict / list
           ← model_dump / normalize_*(snake_case) 后返回
     ← stringified JSON
-  ← 业务逻辑（normalizer / dry_run 槽位检测）
+  ← 业务逻辑（normalizer / dry_run 槽位检测 / commit 守卫 + 副作用）
 
 身份注入（CLAUDE.md 不变量）：
 - LLM-facing tool schema 不含 emailAddress / openId / mobile
 - _inject_caller 在每次 call 前从 CallerIdentity 注入 openid/email 到 args
 - 上游 fmp 端按 emailAddress 鉴权 / 查询
+
+Phase 0 (2026-06-30) 改造：
+- _commit_single_vehicle_reservation 接受 LLM 调起（受 _check_dry_run_guard 保护）
+- 成功路径自带副作用：dispatcher 通知 + reservation_store.save（旧 caller 不再重复）
+- return_vehicle 入参 vehicleStatus 接受中文/数字，统一 coerce 为 int 1-4
 """
 import json
 import logging
 from typing import Any
 
 from car_tools import mcp_client, normalizers
-from ocl.tool_guard import get_current_caller
+from ocl.tool_guard import get_current_caller, get_current_session
 
 log = logging.getLogger(__name__)
+
+
+# commit 守卫：要求本会话内最近一次 _dry_run_vehicle_reservation 完整、近期、args 一致
+_DRY_RUN_LOOKBACK_SECONDS = 600
+_COMMIT_REQUIRED_FIELDS = ("vehicle_type", "platform", "start_time", "end_time",
+                           "task_name", "location")
+
+
+def _check_dry_run_guard(args: dict) -> str | None:
+    """Return None if guard passes, else an error message explaining why.
+
+    双源校验（commit 必须有一份近期、完整、字段一致的 dry_run）：
+    - 源 1 tool_capture：单轮——dry_run 与 commit 在同一个 chat()/run_conversation 调用内
+    - 源 2 dry_run_state：多轮——dry_run 在上一轮，tool_capture 已被 handler 清空（按 openid 回落）
+
+    收紧后的 fail-open：删除旧 card_action_handler / FSM commit 路径后，
+    "两个身份锚（session_id + openid）都为空"不再放行——视为误配/匿名调用，拒绝下单。
+    """
+    from ocl import tool_capture
+    from bot import dry_run_state
+    import time
+    session_id = get_current_session()
+    caller = get_current_caller()
+    openid = caller.openid if caller else ""
+    now = time.time()
+
+    # 源 1：tool_capture（单轮）
+    if session_id:
+        found, verdict = _scan_capture_for_dry_run(tool_capture.read(session_id), args, now)
+        if found:
+            return verdict  # None=通过 / str=具体拒绝原因
+
+    # 源 2：dry_run_state（多轮，过期由 get() 内部清除）
+    if openid:
+        snap = dry_run_state.get(openid)
+        if snap is not None:
+            return _match_dry_run_fields(snap["args"], args)
+
+    # 两源都无有效 dry_run
+    if not session_id and not openid:
+        return "无法校验下单前置（会话与身份均缺失），请重新发起预约并由用户确认"
+    return "本会话内未找到有效的 _dry_run，请先调用 _dry_run_vehicle_reservation 完成槽位收集"
+
+
+def _scan_capture_for_dry_run(history: list, args: dict, now: float):
+    """扫 tool_capture，返回 (found, verdict)。
+    found=是否存在 dry_run 记录；verdict=None 通过 / str 拒绝原因。无记录 → (False, None)。"""
+    for entry in reversed(history):
+        if entry.get("tool") != "_dry_run_vehicle_reservation":
+            continue
+        result = entry.get("result")
+        if not isinstance(result, dict) or not result.get("dry_run"):
+            continue
+        if result.get("missing_fields"):
+            return True, "最近一次 dry_run 仍有缺字段，请先补齐后再下单"
+        mismatch = _match_dry_run_fields(result.get("args") or {}, args)
+        if mismatch:
+            return True, mismatch
+        ts = entry.get("timestamp") or 0
+        if ts and (now - ts) > _DRY_RUN_LOOKBACK_SECONDS:
+            return True, f"dry_run 已超过 {_DRY_RUN_LOOKBACK_SECONDS // 60} 分钟，请重新确认"
+        return True, None
+    return False, None
+
+
+def _match_dry_run_fields(dry_args: dict, commit_args: dict) -> str | None:
+    """6 个必填字段逐一相等校验。返回 None 通过 / str 不一致原因。"""
+    for k in _COMMIT_REQUIRED_FIELDS:
+        if str(dry_args.get(k) or "").strip() != str(commit_args.get(_commit_arg_key(k)) or "").strip():
+            return (f"字段 {k} 与最近一次 dry_run 不一致（{dry_args.get(k)!r} vs "
+                    f"{commit_args.get(_commit_arg_key(k))!r}），请重走 dry_run")
+    return None
+
+
+def _commit_arg_key(snake: str) -> str:
+    """snake_case field name → commit 工具入参键（camelCase / snake_case 二选一）。"""
+    mapping = {
+        "vehicle_type": "vehicleType",
+        "platform":     "platform",
+        "start_time":   "startTime",
+        "end_time":     "endTime",
+        "task_name":    "taskName",
+        "location":     "location",
+    }
+    return mapping.get(snake, snake)
 
 
 # ── 身份注入 ──────────────────────────────────────────────────────────────
@@ -36,18 +126,22 @@ def _inject_caller(args: dict) -> dict:
     注入会 `TypeError: unexpected keyword argument 'openId'`。openid 仍在 OCL L1/L2
     鉴权层用，不传上游。
 
-    2026-06-25：新版上游（dmz-fmp-mcp-260409）每个 @Tool 都接受 emailAddress + mobile。
-    **实测上游在同时收到 email+mobile 时按 mobile 查**，而多数用户在 fmp 后端按邮箱注册
-    （手机号未必登记）→ 同时发会把"邮箱已注册"的用户顶成"非平台用户"（实测 chenyihang
-    邮箱查到 8 辆车，加手机号后变 0 辆"非平台用户"）。故策略：**优先邮箱，仅当无邮箱时
-    才用手机号**（手机号作为无邮箱用户的兜底识别符）。
+    2026-06-30：测试环境 qiongchi-dev 实测——
+    - 同时传 email + mobile：fmp 上游按 email 查；如果 email 不在用户表（很多人只填手机号），
+      报"用户不是平台用户"，0 辆
+    - 只传 mobile：fmp 按 mobile 查，能查到（chenyihang 19943221833 查到 86 辆）
+    - 只传 email：chenyihang 的 email 字段在 fmp 用户表是空字符串 ""，按 email 查不到
+    故策略：**优先 mobile（更可靠，几乎所有用户都有），仅当无 mobile 时才用 email**。
+
+    历史：旧策略"优先 email"是基于已废弃的 immotors 内部 fmp 行为；新版 qiongchi-dev
+    行为已变（2026-06-30 确认）。
     """
     caller = get_current_caller()
     injected: dict[str, Any] = {}
-    if caller.email:
-        injected["emailAddress"] = caller.email
-    elif caller.mobile:
+    if caller.mobile:
         injected["mobile"] = caller.mobile
+    elif caller.email:
+        injected["emailAddress"] = caller.email
     return {**injected, **args}
 
 
@@ -140,11 +234,24 @@ def fetch_available_vehicles(args: dict, **_) -> str:
 # ── 2. single_vehicle_reservation（真实下单 — LLM 不可见） ──────────────────
 
 def _commit_single_vehicle_reservation(args: dict, **_) -> str:
-    """实际下单。仅供 card_action_handler.confirm 流程调用，不暴露给 LLM。
+    """实际下单（成功路径自带副作用：dispatcher DM + reservation_store.save）。
 
-    返回 snake_case 序列化的 ReservationResult（normalizers.normalize → model_dump），
-    让 build_success_card / notify_dispatchers / reservation_store 一律按 snake_case 读取。
+    Phase 0 (2026-06-30) 改造：
+    - 接受 LLM 调起（受 _check_dry_run_guard 守卫：必须本会话已有完整 dry_run）
+    - 接受 card_action_handler 旧路径调起（守卫 fail-open：session_id 缺失时直接放过，
+      旧 card 流程在 main.py 启动后第一个 handler.run 之前不会注入 session_id）
+    - 副作用（dispatcher 通知 / reservation_store 持久化）全部在 handler 内部完成，
+      旧 caller 不再重复触发
+
+    返回 snake_case 序列化的 ReservationResult。
     """
+    # ── 守卫：要求本会话最近一次 _dry_run 完整 + args 一致 + 未过期 ──
+    guard_err = _check_dry_run_guard(args)
+    if guard_err:
+        return json.dumps({"error": guard_err,
+                           "hint": "请先调用 _dry_run_vehicle_reservation 完成槽位收集并由用户确认后再下单"},
+                          ensure_ascii=False)
+
     payload = {
         "vehicleNo":    args.get("vehicleNo") or args.get("vehicle_no"),
         "startTime":    args.get("startTime") or args.get("start_time"),
@@ -173,7 +280,6 @@ def _commit_single_vehicle_reservation(args: dict, **_) -> str:
         out = result.model_dump()
     except normalizers.NormalizeError:
         # 上游成功但 data:null（成功信息全在 message）→ 构造最小成功结果。
-        # SUCCESS 卡从 car_state 读字段；notify_dispatchers 从 message 提调度员 email。
         out = {
             "success": True,
             "vehicle_no": payload.get("vehicleNo", ""),
@@ -182,6 +288,32 @@ def _commit_single_vehicle_reservation(args: dict, **_) -> str:
         }
     if msg and not out.get("message"):
         out["message"] = msg  # 保留上游 message（含调度员 email）
+
+    # ── 副作用 1: 异步通知 dispatcher（fire-and-forget）──
+    try:
+        from car_tools import notify_dispatchers
+        notify_dispatchers.submit_reservation_dispatchers(out)
+    except Exception as e:
+        log.warning("commit_notify_dispatchers_failed: %s", e, exc_info=True)
+
+    # ── 副作用 2: 持久化 reservation → applicant 映射（用于审批后 DM 申请人）──
+    try:
+        from bot import reservation_store
+        rid = out.get("reservation_id") or out.get("reservationId") or ""
+        key = rid or f"car|{out.get('vehicle_no','')}|{out.get('start_time','')}"
+        if key:
+            reservation_store.save(
+                key,
+                caller.openid or "",
+                caller.email or "",
+                out.get("vehicle_no", ""),
+                out.get("start_time", ""),
+                out.get("end_time", ""),
+                out.get("task_name", ""),
+            )
+    except Exception as e:
+        log.warning("commit_reservation_store_save_failed: %s", e, exc_info=True)
+
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -365,12 +497,16 @@ def approval_vehicle_reservation(args: dict, **_) -> str:
 # ── 6. return_vehicle ─────────────────────────────────────────────────────
 
 def return_vehicle(args: dict, **_) -> str:
+    # 2026-06-30：vehicleStatus 接受 LLM 报的中文（可用/故障/维保/报废）或数字，
+    # 统一 coerce 为上游约定的 int 1-4（与 fmp MCP 契约一致）。
+    raw_status = args.get("vehicleStatus") or args.get("vehicle_status")
+    coerced_status = normalizers.coerce_vehicle_status_to_int(raw_status)
     payload = {
         "vehicleNo":                args.get("vehicleNo") or args.get("vehicle_no"),
         "returnLocation":           args.get("returnLocation") or args.get("return_location"),
         "keyPosition":              args.get("keyPosition") or args.get("key_position"),
         "changeModule":             args.get("changeModule") or args.get("change_module"),
-        "vehicleStatus":            args.get("vehicleStatus") or args.get("vehicle_status"),
+        "vehicleStatus":            coerced_status if coerced_status is not None else raw_status,
         "vehicleStatusDescription": args.get("vehicleStatusDescription")
                                           or args.get("vehicle_status_description"),
         "vin":                      args.get("vin"),

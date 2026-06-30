@@ -9,7 +9,7 @@ import pytest
 from car_tools import handlers
 from car_tools import mcp_client
 from car_tools.mcp_client import McpError, McpToolNotFound
-from ocl.tool_guard import set_current_caller, CallerIdentity
+from ocl.tool_guard import set_current_caller, set_current_session, CallerIdentity
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -32,9 +32,30 @@ class FakeMcp:
 
 @pytest.fixture(autouse=True)
 def _fresh_caller():
+    import time as _t
+    from bot import dry_run_state
     set_current_caller(CallerIdentity())
+    set_current_session("")
+    with dry_run_state._lock:
+        dry_run_state._store.clear()
+    dry_run_state.set_clock(_t.time)
     yield
     set_current_caller(CallerIdentity())
+    set_current_session("")
+    with dry_run_state._lock:
+        dry_run_state._store.clear()
+    dry_run_state.set_clock(_t.time)
+
+
+def _seed_dry_run_state(openid: str, args: dict | None = None) -> None:
+    """往 dry_run_state 灌一条完整快照（让守卫通过）。"""
+    from bot import dry_run_state
+    default_args = {
+        "vehicle_type": "DM2", "platform": "Xavier",
+        "start_time": "2026-06-16 09:00", "end_time": "2026-06-16 18:00",
+        "task_name": "test", "location": "loc",
+    }
+    dry_run_state.save(openid, args if args is not None else default_args)
 
 
 @pytest.fixture
@@ -59,8 +80,14 @@ def test_commit_surfaces_business_error_message(monkeypatch):
     }})
     monkeypatch.setattr(mcp_client, "_client", fm)
     set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    _seed_dry_run_state("ou_a", {
+        "vehicle_type": "DM2", "platform": "Xavier",
+        "start_time": "2026-06-26 09:50", "end_time": "2026-06-26 10:50",
+        "task_name": "MFF调试", "location": "上海",
+    })
     raw = handlers._commit_single_vehicle_reservation({
-        "vehicleNo": "AATI25SNV639", "startTime": "2026-06-26 09:50",
+        "vehicleNo": "AATI25SNV639", "vehicleType": "DM2", "platform": "Xavier",
+        "startTime": "2026-06-26 09:50",
         "endTime": "2026-06-26 10:50", "taskName": "MFF调试", "location": "上海"})
     res = json.loads(raw)
     assert "已存在未完成的预约记录" in res.get("error", "")
@@ -74,7 +101,15 @@ def test_commit_success_still_normalizes(monkeypatch):
                                "endTime": "2026-06-26 10:50", "taskName": "t", "location": "上海"}}})
     monkeypatch.setattr(mcp_client, "_client", fm)
     set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
-    raw = handlers._commit_single_vehicle_reservation({"vehicleNo": "PNV1"})
+    _seed_dry_run_state("ou_a", {
+        "vehicle_type": "DM2", "platform": "Xavier",
+        "start_time": "2026-06-26 09:50", "end_time": "2026-06-26 10:50",
+        "task_name": "t", "location": "上海",
+    })
+    raw = handlers._commit_single_vehicle_reservation({
+        "vehicleNo": "PNV1", "vehicleType": "DM2", "platform": "Xavier",
+        "startTime": "2026-06-26 09:50", "endTime": "2026-06-26 10:50",
+        "taskName": "t", "location": "上海"})
     res = json.loads(raw)
     assert "error" not in res
     assert res.get("vehicle_no") == "PNV1"
@@ -89,7 +124,15 @@ def test_commit_success_with_data_null_message(monkeypatch):
     }})
     monkeypatch.setattr(mcp_client, "_client", fm)
     set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
-    raw = handlers._commit_single_vehicle_reservation({"vehicleNo": "AATI25SNV639"})
+    _seed_dry_run_state("ou_a", {
+        "vehicle_type": "DM2", "platform": "Xavier",
+        "start_time": "2026-06-26 09:50", "end_time": "2026-06-26 10:50",
+        "task_name": "MFF调试", "location": "上海",
+    })
+    raw = handlers._commit_single_vehicle_reservation({
+        "vehicleNo": "AATI25SNV639", "vehicleType": "DM2", "platform": "Xavier",
+        "startTime": "2026-06-26 09:50", "endTime": "2026-06-26 10:50",
+        "taskName": "MFF调试", "location": "上海"})
     res = json.loads(raw)
     assert "error" not in res, f"成功不应有 error: {res}"
     assert res.get("success") is True
@@ -131,22 +174,25 @@ def test_no_mobile_field_when_none(fake_mcp):
     assert "mobile" not in args
 
 
-def test_prefers_email_over_mobile(fake_mcp):
-    """有邮箱时只发 emailAddress、不发 mobile（上游同时收到会按 mobile 查 → 误判非平台用户）。"""
+def test_prefers_mobile_over_email(fake_mcp):
+    """2026-06-30 改造：优先 mobile —— qiongchi-dev 上游按 emailAddress 过滤，
+    但很多用户在 fmp 端 email 字段是空（"chenyihang"实测 emailAddress=""）。
+    只发 mobile 不会丢用户，且能查到 86 辆车；同时发反而把用户顶成"非平台用户"。
+    """
     set_current_caller(CallerIdentity(openid="ou_alice", email="a@x.com", mobile="13800138000"))
     handlers.fetch_available_vehicles({"vehicle_type": "DM2"})
     _, args = fake_mcp.calls[0]
-    assert args.get("emailAddress") == "a@x.com"
-    assert "mobile" not in args  # 关键：有邮箱时绝不带 mobile
+    assert args.get("mobile") == "13800138000"
+    assert "emailAddress" not in args  # 关键：有 mobile 时绝不带 email（防上游按 email 过滤误杀）
 
 
-def test_mobile_fallback_when_no_email(fake_mcp):
-    """无邮箱、有手机号 → 用手机号兜底（覆盖只登记了手机号的用户）。"""
-    set_current_caller(CallerIdentity(openid="ou_alice", email="", mobile="13800138000"))
+def test_email_fallback_when_no_mobile(fake_mcp):
+    """无 mobile、有 email → 用 email 兜底（覆盖无手机号但有邮箱的用户）。"""
+    set_current_caller(CallerIdentity(openid="ou_alice", email="a@x.com", mobile=None))
     handlers.fetch_available_vehicles({"vehicle_type": "DM2"})
     _, args = fake_mcp.calls[0]
-    assert "emailAddress" not in args
-    assert args.get("mobile") == "13800138000"
+    assert "mobile" not in args
+    assert args.get("emailAddress") == "a@x.com"
 
 
 # ── fetch_available_vehicles ──────────────────────────────────────────────
@@ -181,6 +227,7 @@ def test_commit_calls_mcp_with_args(fake_mcp, auth_caller):
         "startTime": "2026-06-16 09:00", "endTime": "2026-06-16 18:00",
         "taskName": "test", "location": "loc",
     }
+    _seed_dry_run_state("ou_alice")  # 守卫：注入 dry_run 快照（默认值与 commit args 对齐）
     raw = handlers._commit_single_vehicle_reservation({
         "vehicleNo": "PNV332", "vehicleType": "DM2", "platform": "Xavier",
         "startTime": "2026-06-16 09:00", "endTime": "2026-06-16 18:00",
