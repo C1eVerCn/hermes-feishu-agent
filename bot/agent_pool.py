@@ -1,7 +1,16 @@
+"""bot/agent_pool — 飞书 bot 的 LLM agent 池 + 系统提示。
+
+每个 user_id 一个 AIAgent 实例（hermes）。所有实例使用同一个系统提示
+（identity + tool 列表 + 不变量）。完整业务流程在 bot/skills/car-booking/SKILL.md
+里，构造时拼到 system prompt 末尾。
+
+CLAUDE.md 硬上限：max_iterations=10（默认值），timeout=120s。
+"""
 import logging
 import os
 import threading
-from collections import OrderedDict
+import time
+from collections import OrderedDict, deque
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -88,47 +97,85 @@ def _now_cn() -> str:
     return now.strftime("%Y-%m-%d %H:%M:%S") + f" (周{weekdays[now.weekday()]})"
 
 
-# 以 ephemeral_system_prompt 注入 —— 覆盖 ~/.hermes/SOUL.md（仅本服务）
-# The base prompt is plain text (no .format() applied). We prepend the
-# current-time line at construction time to avoid str.format() interpreting
-# the literal `{`/`}` in JSON examples (e.g. `{"tool": "..."}`) as
-# placeholders.
+# 系统提示（2026-06-30 精简 v3）：核心 3 条 + 工具列表 + 不变量。
+# 业务流程在 bot/skills/car-booking/SKILL.md 里（构造时拼到末尾）。
+# 设计：minimax M2.7-highspeed 对长 system prompt 服从性差，所以核心规则放最顶部。
 _FEISHU_SYSTEM_PROMPT_BASE = """当前时间：__NOW_CN__
-（基于上述时间换算 "今天"/"明天"/"后天" 等相对日期，如今天是 2026-06-16，则"明天"=2026-06-17，"后天"=2026-06-18；周X 表示星期X）
+（相对日期换算：今天=N，今天+1=明天，今天+2=后天；周X=星期X）
 
-你是约车助手，专注于车辆预约管理：
+你是飞书"约车助手"机器人。所有交互通过飞书文字消息完成——卡片只展示信息，**不点不动**，用户**打字**给你指令。
+
+# 🚨 3 条必须遵守
+1. **用户表达模糊时，立即调工具查，不要反复问。** 如"现在有什么车"→ 立即 `fetch_available_vehicles({})` 看返回。
+2. **绝不编造**——所有数字、平台、状态必须从工具返回的 `data` 数组读。**绝对不要**假装"dry-run 通过"或"约车成功"——这些必须来自工具的真实返回。
+3. **不查不要回答**——不知道就调工具查。
+
+# 🚨 你的知识盲区
+你是约车助手，**不知道任何具体车辆信息**（没有车列表、没有车辆编号、没有车辆平台）。任何关于"有什么车""PNV332 是否可用"的问题**必须**调工具。**禁止**编造"奔驰/宝马"等无关品牌——本系统是"约车"业务，不是汽车评测。
+
+# 🚨 工具用途区分（重要）
+每个工具用途单一，**不能互相替代**：
+- `fetch_available_vehicles` — **仅**查可用车列表
+- `_dry_run_vehicle_reservation` — **仅**做预约 dry-run（返回 summary+args）
+- `_commit_vehicle_reservation` — **仅**真实下单（受 session 守卫保护）
+- `cancel_vehicle_reservation` / `return_vehicle` / `fetch_user_reservation` / `fetch_user_approval` 等各司其职
+
+**绝对禁止**：用 `fetch_available_vehicles` 的结果**假装**是 `dry_run` 或 `commit` 的结果——这是完全不同的操作。约车要提交时，**必须**调 `_dry_run_vehicle_reservation` 让系统校验所有字段 + 拼装 summary，**然后**才能 commit。
+
+# 🚨 重要：处理"现在有什么车"类查询
+**唯一**允许的回答路径：先调 `fetch_available_vehicles({})`（不传任何参数）→ 拿到结果 → 按 `芯片` 字段精确分组 → 用数字回答。
+**禁止**不调工具就回答"没有车""都被预约了"等——你不知道就说不允许回答。
+
+# 能力
 - 查询可用车辆
 - 预约 / 取消 / 归还车辆
 - 查询我的预约、查询待审批（调度员/管理员）
 - 审批预约（调度员/管理员）
 
-**字段与枚举**：
-- 芯片平台：Xavier / ADCU / Orin / Thor
-- 车辆类型：DM2 / CT1 / 大F车 / CM0 / BM2 / ...（可用 get_common_dictionary 查询）
-- 时间格式：yyyy-MM-dd HH:mm
-- 任务 / 地点：自由文本
+# 工具清单
+- `fetch_available_vehicles` — 查可用车（**用户没指定平台/车型时不传 platform/vehicleType，直接 `{}`**）
+- `_dry_run_vehicle_reservation` — 预约 dry-run（两步第一步）
+- `_commit_vehicle_reservation` — 真正下单（两步第二步，受 session 守卫保护）
+- `cancel_vehicle_reservation` / `return_vehicle` / `fetch_user_reservation` / `fetch_user_approval` / `approval_vehicle_reservation` / `get_user_context` / `get_common_dictionary`
 
-**信任用户报出的车辆编号**：
-- 用户说"预约 PNV332"时直接调 _dry_run_vehicle_reservation(vehicleNo="PNV332", ...)，不先 list
-- 车辆编号格式：字母+数字（如 PNV332 / SVV027 / SOV646）
-
-**工具规则**：
-- emailAddress / openId / mobile 由系统注入，不要询问
-- 不要编造车辆编号、平台、调度员邮箱
+# 不变量
+- `emailAddress` / `openId` / `mobile` 由系统注入，**永远不要**作为工具参数
 - 单轮最多 2 次工具调用
-- 复杂多槽位输入（缺少字段）→ 直接调 _dry_run_vehicle_reservation 让系统生成"缺字段"卡片
-
-**预约两步流程（强制）**：
-- 用户表达"预约 XX"时调 _dry_run_vehicle_reservation 拿确认卡
-- 用户点 [确认] 后系统自动调 _commit_vehicle_reservation 真正下单
-- 你看不到 _commit_vehicle_reservation 的工具描述，但 dry_run 已替你完成预约
-
-**输出边界**：
-- 不要输出 tool call JSON
-- 不要在回复中列举具体值（卡片会呈现）
 - 一次只发一条最终回复
+- 卡片由系统渲染，文本里不要写 markdown 表格/列表
+- 单条 ≤200 字
 
-回复风格：简洁直接，单条 ≤200 字。""".strip()
+# 完整操作流程在下方 skill
+"""
+
+
+# Skill 加载：启动时读一次，缓存在模块级。AIAgent 每次构造时引用这份内容。
+def _load_car_booking_skill() -> str:
+    """从 bot/skills/car-booking/SKILL.md 读取完整 markdown。
+
+    失败时返回空字符串（fail-open，agent 仍能工作但少了流程参考）。
+    """
+    from bot.skills import load_skill
+    content = load_skill("car-booking")
+    return content or ""
+
+
+_CAR_BOOKING_SKILL = _load_car_booking_skill()
+
+# ── per-user 多轮对话历史（内存 deque，方案 B）─────────────────────────────
+_HISTORY_TURNS = 6                       # 最近 N 轮（user+assistant 成对）
+_HISTORY_MAXLEN = _HISTORY_TURNS * 2     # deque 条目上限 = 12
+_HISTORY_TTL_SECONDS = 1800              # 30 分钟空闲 TTL
+_HISTORY_CONTENT_CAP = 800               # 单条 content 截断上限
+
+
+def _cap_content(msg: dict) -> dict:
+    """只保留 role/content 并截断 content（防病态长消息撑爆上下文）。"""
+    raw = msg.get("content")
+    content = "" if raw is None else str(raw)
+    if len(content) > _HISTORY_CONTENT_CAP:
+        content = content[:_HISTORY_CONTENT_CAP]
+    return {"role": msg.get("role", "user"), "content": content}
 
 
 class AgentPool:
@@ -138,6 +185,8 @@ class AgentPool:
         self._max_size = max_size
         self._pool: OrderedDict[str, AIAgent] = OrderedDict()
         self._lock = threading.Lock()
+        self._history: OrderedDict[str, deque] = OrderedDict()  # user_id -> deque(maxlen=12)
+        self._history_touch: dict[str, float] = {}              # user_id -> monotonic last-use
 
     def get_or_create(self, user_id: str) -> AIAgent:
         with self._lock:
@@ -150,14 +199,21 @@ class AgentPool:
             # the pre_tool_call hook and session_map.
             session_id = f"feishu_{user_id}"
 
+            # 2026-06-30：把 skill 追加到 system prompt（AIAgent 构造时一次性
+            # 注入）。hermes KV 缓存命中率高，后续轮不重复拼接。
+            system_prompt = _FEISHU_SYSTEM_PROMPT_BASE.replace("__NOW_CN__", _now_cn())
+            if _CAR_BOOKING_SKILL:
+                system_prompt += "\n\n# 操作手册（car-booking skill）\n\n" + _CAR_BOOKING_SKILL
+
             agent = AIAgent(
                 model=settings.MINIMAX_MODEL,
                 provider="minimax",
                 base_url=settings.MINIMAX_BASE_URL,
                 api_key=settings.MINIMAX_API_KEY,
+                api_mode=settings.MINIMAX_API_MODE,  # M3 必须 anthropic_messages
                 quiet_mode=True,
                 max_iterations=settings.AGENT_MAX_ITERATIONS,
-                ephemeral_system_prompt=_FEISHU_SYSTEM_PROMPT_BASE.replace("__NOW_CN__", _now_cn()),
+                ephemeral_system_prompt=system_prompt,
                 enabled_toolsets=["car"],  # 单一业务域：车辆预约
                 session_id=session_id,
                 user_id=user_id,
@@ -177,9 +233,18 @@ class AgentPool:
 
             if len(self._pool) > self._max_size:
                 evicted_id, evicted_agent = self._pool.popitem(last=False)
+                self._history.pop(evicted_id, None)
+                self._history_touch.pop(evicted_id, None)
                 evicted_sid = getattr(evicted_agent, "session_id", None)
                 if evicted_sid:
                     session_evict(evicted_sid)
+                    # 2026-06-30: 同步清掉 handler 的 skill-injection 标记
+                    # （避免下次该 user_id 复用新 agent 时不再注入 skill）
+                    try:
+                        from bot import handler as _h
+                        _h._SKILL_INJECTED_SESSIONS.discard(evicted_sid)
+                    except Exception:
+                        pass
                 log.debug("Evicted agent for user_id=%s session_id=%s",
                           evicted_id, evicted_sid)
 
@@ -188,6 +253,42 @@ class AgentPool:
     def size(self) -> int:
         with self._lock:
             return len(self._pool)
+
+    def get_history(self, user_id: str) -> list[dict]:
+        """返回最近 N 轮 user/assistant dict；空闲超 TTL 则清空返 []。"""
+        if not user_id:
+            return []
+        with self._lock:
+            dq = self._history.get(user_id)
+            if not dq:
+                return []
+            now = time.monotonic()
+            last = self._history_touch.get(user_id, 0.0)
+            if now - last > _HISTORY_TTL_SECONDS:
+                self._history.pop(user_id, None)
+                self._history_touch.pop(user_id, None)
+                return []
+            self._history_touch[user_id] = now
+            return list(dq)
+
+    def append_turn(self, user_id: str, user_msg: dict, assistant_msg: dict) -> None:
+        """追加一轮（user+assistant 纯文本，跳过 tool 轮）。user_id 为空则忽略。"""
+        if not user_id:
+            return
+        u, a = _cap_content(user_msg), _cap_content(assistant_msg)
+        with self._lock:
+            dq = self._history.get(user_id)
+            if dq is None:
+                dq = deque(maxlen=_HISTORY_MAXLEN)
+                self._history[user_id] = dq
+            dq.append(u)
+            dq.append(a)
+            self._history_touch[user_id] = time.monotonic()
+
+    def clear_history(self, user_id: str) -> None:
+        with self._lock:
+            self._history.pop(user_id, None)
+            self._history_touch.pop(user_id, None)
 
 
 agent_pool = AgentPool(max_size=settings.AGENT_POOL_MAX_SIZE)
