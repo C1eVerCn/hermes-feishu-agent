@@ -4,16 +4,11 @@ hermes-agent integration layer. Owns `AIAgent` lifecycle and the bridge from Fei
 
 ## Files
 
-- `handler.py` — **路由总枢纽（slim orchestrator，2026-06-25 重构后只做编排）**：从事件队列消费 → 身份闸 → 两档路由 → 渲染发送。Tier-1 命中即返回；Tier-2 调 `intent_router`；兜底走 agent。
-- `intent.py` — **意图识别单一事实源**：escape / confirm / booking 意图 / 车辆编号 / 车型平台关键字 / 查询模式。handler 与 car_booking_fsm 都从这里导入（消除了原来 6 处分散、互相漂移的副本）。
-- `intent_router.py` — **Tier-2 LLM 意图分类器**：Tier-1 未命中的消息 → 一次轻量结构化分类（intent + slots + confidence）。结构化输出防漂移；fail-open（异常→unknown→agent）。`_complete` 是唯一网络出口（单测 monkeypatch）。
+- `handler.py` — **路由总枢纽（单路径全对话流，2026-06-30 重构）**：消费事件队列 → 输入校验 → `replies.match_simple_intent`（零延迟问候/帮助）→ 身份闸 `_resolve_identity` → `set_current_caller` / `set_current_session` → role==0 陌生人提示 → `_try_fast_query`（固定查询正则短路，命中直调 car_tools，结果写入多轮历史）→ `replies.handle_identity_query` / `handle_admin_command` → `_run_agent`（统一兜底，多轮 `run_conversation` + `_now_preamble` 时间注入 + `append_turn`）。**FSM / 两档路由已彻底拆除**，所有业务消息进入单一 LLM 路径。
+- `intent.py` — **意图识别单一事实源**：escape / confirm / booking 意图 / 车辆编号 / 车型平台关键字 / 查询模式。
 - `replies.py` — 无 agent 的确定性文案：问候/帮助（`match_simple_intent`）、身份查询（`handle_identity_query`/`identity_reply`）、管理员命令（`handle_admin_command`）、agent 路径身份前导词（`identity_preamble`）。
-- `fast_path.py` — 确定性查询快速路径：命中 `intent.match_query` 的精确短语 → `run_tool` 直接调 car_tools handler 并建卡（绕过 LLM）。Tier-1 与 Tier-2 query 共用 `run_tool`。
-- `card_action_handler.py` — deterministic Feishu card-button callback: `handle(open_id, value)` → 注入 CallerIdentity → 走 car_tools 业务（select_vehicle / confirm_booking / cancel_flow） → 返回 (toast_text, updated_card)。No LLM. Injected into `feishu.ws_client` by `main.py`.
-- `car_booking_fsm.py` — 13 状态约车 FSM。`advance()` 逐状态推进；`start_booking(user_id, slots)` 用 Tier-2 抽到的槽位**播种**并跳到第一个缺口状态（"说全了的人直接到确认卡"）。意图/编号识别复用 `bot.intent`。
-- `return_fsm.py` — 还车表单 FSM（RET_VEHICLE→LOCATION→KEY→MODULE→STATUS→DESC→CONFIRM）。收集新版上游 return_vehicle 的 5 个必填字段 + 二次确认卡。入口：Tier-1 `intent.is_return_intent` 或 Tier-2 `return`；按钮用 `ret_*` action（card_action_handler 分发）。
-- `agent_pool.py` — LRU pool of `AIAgent` instances keyed by `user_id`; max 100 entries; thread-safe. Generates stable `session_id = f"feishu_{user_id}"`, registers/evicts `ocl.session_map` mappings for the feishu_acl plugin. Mounts DMZMemoryProvider per user.
-- `car_state.py` — per-user 车辆预约状态机（10min TTL）：save / update / get / clear / as_dict。记录用户当前正在进行的 booking / cancel / return / approve / records 意图与已收集的槽位。
+- `agent_pool.py` — LRU pool of `AIAgent` instances keyed by `user_id`; max 100 entries; thread-safe. Generates stable `session_id = f"feishu_{user_id}"`, registers/evicts `ocl.session_map` mappings for the feishu_acl plugin. Mounts DMZMemoryProvider per user. **同时维护 per-user 多轮对话历史 deque（最近 6 轮 / 30分钟空闲 TTL / 800字 content 截断）**；接口：`get_history(user_id)` / `append_turn(user_id, user_msg, assistant_msg)` / `clear_history(user_id)`；随 agent 一起按 LRU 驱逐。
+- `dry_run_state.py` — **跨轮次 dry_run 快照（内存，per-openid）**：由 `car_tools/handlers._dry_run_reservation` 完成 dry_run 后写入，在多轮对话中当 `ocl.tool_capture` 缓存为空时由 commit 守卫 `_check_dry_run_guard` 回落读取，保证 dry_run→commit 不变量跨 turn 成立。TTL=600s，仅存 6 个去敏字段，不含 emailAddress/openId/mobile。
 - `reservation_store.py` — 持久化 reservation_id → applicant_open_id，用于审批后 DM 申请人（vehicle_no 字段替代旧 bench_no）。
 - `dmz_memory.py` — DMZMemoryProvider（hermes MemoryProvider 协议实现，跨会话持久化偏好 / 操作 / 错误模式；30 天 TTL）。
 - `curator_runner.py` — Phase 3 自进化 Curator（巡检工具 schema，**只**生成 Skill / 工具描述建议，不改业务代码）。
@@ -24,10 +19,12 @@ hermes-agent integration layer. Owns `AIAgent` lifecycle and the bridge from Fei
 
 - One `AIAgent` instance per `user_id` — never share across users (hermes-agent session state is per-instance)
 - Always create with `quiet_mode=True`, `max_iterations=30` — these are not configurable at runtime
-- Pool eviction: LRU, evict oldest when `len > max_size`; evicted instances are discarded (hermes-agent persists to `~/.hermes/state.db` automatically)
+- Pool eviction: LRU, evict oldest when `len > max_size`; evicted instances are discarded. **注意**：本 bot 未传 `session_db` 给 `AIAgent`，hermes **不**自动持久化对话轮次到 `~/.hermes/state.db`；多轮历史保存在内存 `agent_pool` per-user deque（方案 B，最近 6 轮 / 30分钟 TTL，非磁盘）。
 - Thread pool: `max_workers=5` — limits concurrent Minimax API calls to stay within rate limit
 
 ## handler.py 两档路由（2026-06-25 重构）
+
+> ⚠️ 已过时（2026-06-30）：FSM/两档路由已拆除，改为单路径 LLM 多轮对话；以 handler.py 顶部 docstring 为准。
 
 ```
 event → extract (user_id, chat_id, text) → validate input
@@ -61,6 +58,8 @@ Empty or whitespace-only text → reply with a static prompt string, skip LLM.
 
 ## car_state 状态机（10min TTL）
 
+> ⚠️ 已过时（2026-06-30）：`car_state.py` / `car_booking_fsm.py` / `return_fsm.py` / `intent_router.py` / `fast_path.py` / `card_action_handler.py` 均已删除。以下为历史参考。
+
 - IDLE → 用户说「查车」→ QUERY_PENDING → fetch_available_vehicles
 - QUERY_PENDING → 用户点 [选N] → BOOKING_DRY_RUN → _dry_run_reservation
 - BOOKING_DRY_RUN 缺字段 → 用户补字段 → 重新 dry_run → BOOKING_DRY_RUN
@@ -74,4 +73,4 @@ Empty or whitespace-only text → reply with a static prompt string, skip LLM.
 - Do not hold the pool lock while calling `AIAgent.chat()` — acquire lock only to get/create the instance
 - Do not retry `AIAgent.chat()` on failure — hermes-agent has internal retry; double-retry amplifies Minimax costs
 - Do not put business logic here beyond state machine + 快速路径 dispatch — car_tools/handlers 是业务核心
-- Do not modify car_state without updating car_state tests (test_car_state.py)
+- Do not add new tools to car_tools without registering them in `ocl/permission.py::ROLE_TOOLS`
