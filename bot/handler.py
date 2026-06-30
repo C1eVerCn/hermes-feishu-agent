@@ -212,6 +212,7 @@ def _run_agent(chat_id: str, user_id: str, role: int, name: str,
     start = time.monotonic()
     captured: list[dict] = []
     response = ""
+    turn_ok = False
     # 2026-06-30 流式输出：先发一个占位卡片 → agent.stream_delta_callback 每收到
     # 一段文字就 PATCH 一次占位 → 用户看到"打字机"效果，感知延迟从 26s → 几秒。
     from feishu.sender import StreamCard
@@ -239,11 +240,7 @@ def _run_agent(chat_id: str, user_id: str, role: int, name: str,
         result = future.result(timeout=settings.AGENT_TIMEOUT_SECONDS)
         response = result["final_response"] if isinstance(result, dict) else str(result)
         captured = tool_capture.read(session_id)
-        # 成功一轮：把原始用户文本 + 助手回复写入多轮历史（跳过 preamble/时间）
-        agent_pool.append_turn(
-            user_id,
-            {"role": "user", "content": text},
-            {"role": "assistant", "content": response})
+        turn_ok = True
         latency = time.monotonic() - start
         metrics.record("llm_latency_seconds", latency)
         metrics.inc("messages_processed")
@@ -264,6 +261,13 @@ def _run_agent(chat_id: str, user_id: str, role: int, name: str,
     ocl_result = ocl_apply(response or "", user_id, captured=captured)
     if ocl_result.blocked:
         metrics.inc("errors_ocl_blocked")
+    # 仅成功且未被 OCL 拦截的回复才写入多轮历史
+    # （避免把被拦截内容/超时·错误回复喂回下一轮 prompt）
+    if turn_ok and not ocl_result.blocked:
+        agent_pool.append_turn(
+            user_id,
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": response})
     # 2026-06-30 流式输出：用 PATCH 更新占位卡片（用户看到"打字机"效果），
     # 而不是再发一条新消息。如果 OCL 阶段判定为 blocked（不应再展示），
     # 就用普通发送（不更新占位）。

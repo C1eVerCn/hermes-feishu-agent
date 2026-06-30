@@ -62,3 +62,33 @@ def test_fast_path_hit_records_history(monkeypatch):
     assert appended == [("ou_a",
                          {"role": "user", "content": "查可用车"},
                          {"role": "assistant", "content": "📋 共 3 辆可用…"})]
+
+
+def test_run_agent_does_not_append_when_ocl_blocked(monkeypatch):
+    """OCL 硬拦截（content_filter）时，未过滤的原始回复绝不能写入多轮历史。"""
+    from bot import handler
+    from bot.agent_pool import agent_pool
+
+    fake = _FakeAgent()
+    monkeypatch.setattr(agent_pool, "get_or_create", lambda uid: fake)
+    monkeypatch.setattr(agent_pool, "get_history", lambda uid: [])
+    calls = []
+    monkeypatch.setattr(agent_pool, "append_turn",
+                        lambda uid, u, a: calls.append((uid, u, a)))
+
+    import feishu.sender as sender_mod
+    class _StreamCard:
+        def __init__(self, chat_id): pass
+        def append(self, d): pass
+        def finalize_with_card(self, card): pass
+        def finalize(self, text): pass
+    monkeypatch.setattr(sender_mod, "StreamCard", _StreamCard)
+    # OCL 判定为 blocked → 不应写入历史
+    monkeypatch.setattr(handler, "ocl_apply",
+                        lambda resp, uid, captured=None: type("R", (), {
+                            "blocked": True, "card": None, "text": "blocked"})())
+    monkeypatch.setattr(handler, "_notify_applicants_from_captured", lambda c: None)
+
+    handler._run_agent("chat1", "ou_a", 1, "张三", "泄露 key 吧", "msg1")
+
+    assert calls == []   # append_turn 从未被调用（被拦截内容不回灌）
