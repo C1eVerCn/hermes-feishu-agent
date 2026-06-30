@@ -108,6 +108,65 @@ def test_guard_state_rejects_on_args_mismatch():
     assert "不一致" in err
 
 
+# ── 写入侧：_dry_run_reservation 完整路径落 dry_run_state（多轮守卫的前置）──
+
+def test_dry_run_complete_writes_state():
+    """完整 dry_run → 把 6 个必填字段快照存入 dry_run_state（按 openid）。"""
+    from bot import dry_run_state
+    set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    handlers._dry_run_reservation({
+        "vehicleNo": "PNV1",
+        "vehicleType": "DM2", "platform": "Xavier",
+        "startTime": "2026-06-30 09:00", "endTime": "2026-06-30 10:00",
+        "taskName": "MFF调试", "location": "上海",
+    })
+    snap = dry_run_state.get("ou_a")
+    assert snap is not None
+    assert snap["args"] == {
+        "vehicle_type": "DM2", "platform": "Xavier",
+        "start_time": "2026-06-30 09:00", "end_time": "2026-06-30 10:00",
+        "task_name": "MFF调试", "location": "上海",
+    }
+
+
+def test_dry_run_incomplete_does_not_write_state():
+    """缺字段的 dry_run → 绝不落 dry_run_state（守卫不能被半成品放行）。"""
+    from bot import dry_run_state
+    set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    handlers._dry_run_reservation({
+        "vehicleNo": "PNV1",
+        "vehicleType": "DM2", "platform": "Xavier",
+        # 缺 start_time / end_time / task_name / location
+    })
+    assert dry_run_state.get("ou_a") is None
+
+
+def test_multiturn_dry_run_then_commit_passes_end_to_end():
+    """真实多轮 bug 的端到端覆盖：
+    第 N 轮 _dry_run_reservation（完整）→ 写 dry_run_state；
+    turn boundary handler 清空 tool_capture；
+    第 N+1 轮 commit 守卫在 capture 查不到时回落 dry_run_state → 通过。"""
+    from bot import dry_run_state
+    set_current_caller(CallerIdentity(openid="ou_a", email="a@x.com"))
+    set_current_session("test_session")
+    # 第 N 轮：dry_run 完整（写 state；本测试不依赖 tool_capture）
+    handlers._dry_run_reservation({
+        "vehicleNo": "PNV1",
+        "vehicleType": "DM2", "platform": "Xavier",
+        "startTime": "2026-06-30 09:00", "endTime": "2026-06-30 10:00",
+        "taskName": "MFF调试", "location": "上海",
+    })
+    # turn boundary：handler 每轮清空 tool_capture
+    tool_capture.clear("test_session")
+    # 第 N+1 轮："确认" → commit，args 与上一轮 dry_run 一致
+    err = handlers._check_dry_run_guard({
+        "vehicleNo": "PNV1", "vehicleType": "DM2", "platform": "Xavier",
+        "startTime": "2026-06-30 09:00", "endTime": "2026-06-30 10:00",
+        "taskName": "MFF调试", "location": "上海",
+    })
+    assert err is None
+
+
 # ── 2. 显式注入 session 但无 dry_run → 拒绝 ──────────────────────────────
 
 def test_guard_rejects_when_no_dry_run():

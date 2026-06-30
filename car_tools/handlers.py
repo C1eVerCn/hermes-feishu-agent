@@ -24,6 +24,7 @@ Phase 0 (2026-06-30) 改造：
 """
 import json
 import logging
+import time
 from typing import Any
 
 from car_tools import mcp_client, normalizers
@@ -50,7 +51,6 @@ def _check_dry_run_guard(args: dict) -> str | None:
     """
     from ocl import tool_capture
     from bot import dry_run_state
-    import time
     session_id = get_current_session()
     caller = get_current_caller()
     openid = caller.openid if caller else ""
@@ -74,7 +74,7 @@ def _check_dry_run_guard(args: dict) -> str | None:
     return "本会话内未找到有效的 _dry_run，请先调用 _dry_run_vehicle_reservation 完成槽位收集"
 
 
-def _scan_capture_for_dry_run(history: list, args: dict, now: float):
+def _scan_capture_for_dry_run(history: list, args: dict, now: float) -> tuple[bool, str | None]:
     """扫 tool_capture，返回 (found, verdict)。
     found=是否存在 dry_run 记录；verdict=None 通过 / str 拒绝原因。无记录 → (False, None)。"""
     for entry in reversed(history):
@@ -88,8 +88,9 @@ def _scan_capture_for_dry_run(history: list, args: dict, now: float):
         mismatch = _match_dry_run_fields(result.get("args") or {}, args)
         if mismatch:
             return True, mismatch
+        # commit 守卫 fail-closed：缺失/零时间戳不可信 → 拒绝（而非视为永不过期）
         ts = entry.get("timestamp") or 0
-        if ts and (now - ts) > _DRY_RUN_LOOKBACK_SECONDS:
+        if (not ts) or (now - ts) > _DRY_RUN_LOOKBACK_SECONDS:
             return True, f"dry_run 已超过 {_DRY_RUN_LOOKBACK_SECONDS // 60} 分钟，请重新确认"
         return True, None
     return False, None
@@ -382,6 +383,12 @@ def _dry_run_reservation(args: dict, **_) -> str:
             "args": normalized,
             "already_filled": already,
         }, ensure_ascii=False)
+
+    # ── 完整路径：把这一轮 dry_run 的 6 个必填字段快照存入 dry_run_state，
+    # 供后续轮次（tool_capture 已清）的 commit 守卫回落校验。save 内部按 openid
+    # 脱敏到 6 字段并忽略空 openid，无需额外保护。 ──
+    from bot import dry_run_state
+    dry_run_state.save(get_current_caller().openid, normalized)
 
     parts = [
         f"车辆编号：{normalized['vehicle_no']}",
