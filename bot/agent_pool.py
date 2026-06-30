@@ -100,13 +100,10 @@ def _now_cn() -> str:
 # 系统提示（2026-06-30 精简 v3）：核心 3 条 + 工具列表 + 不变量。
 # 业务流程在 bot/skills/car-booking/SKILL.md 里（构造时拼到末尾）。
 # 设计：minimax M2.7-highspeed 对长 system prompt 服从性差，所以核心规则放最顶部。
-_FEISHU_SYSTEM_PROMPT_BASE = """当前时间：__NOW_CN__
-（相对日期换算：今天=N，今天+1=明天，今天+2=后天；周X=星期X）
-
-你是飞书"约车助手"机器人。所有交互通过飞书文字消息完成——卡片只展示信息，**不点不动**，用户**打字**给你指令。
+_FEISHU_SYSTEM_PROMPT_BASE = """你是飞书"约车助手"机器人。所有交互通过飞书文字消息完成——卡片只展示信息，**不点不动**，用户**打字**给你指令。
 
 # 🚨 3 条必须遵守
-1. **用户表达模糊时，立即调工具查，不要反复问。** 如"现在有什么车"→ 立即 `fetch_available_vehicles({})` 看返回。
+1. **意图可推断就直接调工具查，别为能自己定的细节追问**（如没指定平台/车型 → 直接 `fetch_available_vehicles({})`）。**仅当**请求发散、或缺少无法默认补全的关键信息（缺车 / 缺时段 / 一句话含多个互斥意图）时，**最多问一个**澄清问题然后停下等用户回复；拿到答复立即执行，**不得连问第二次**。
 2. **绝不编造**——所有数字、平台、状态必须从工具返回的 `data` 数组读。**绝对不要**假装"dry-run 通过"或"约车成功"——这些必须来自工具的真实返回。
 3. **不查不要回答**——不知道就调工具查。
 
@@ -201,7 +198,7 @@ class AgentPool:
 
             # 2026-06-30：把 skill 追加到 system prompt（AIAgent 构造时一次性
             # 注入）。hermes KV 缓存命中率高，后续轮不重复拼接。
-            system_prompt = _FEISHU_SYSTEM_PROMPT_BASE.replace("__NOW_CN__", _now_cn())
+            system_prompt = _FEISHU_SYSTEM_PROMPT_BASE
             if _CAR_BOOKING_SKILL:
                 system_prompt += "\n\n# 操作手册（car-booking skill）\n\n" + _CAR_BOOKING_SKILL
 
