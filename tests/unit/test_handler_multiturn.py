@@ -48,3 +48,17 @@ def test_run_agent_threads_history_and_appends_turn(monkeypatch):
     assert appended["uid"] == "ou_a"
     assert appended["u"] == {"role": "user", "content": "Orin 吧"}   # 存原文（非 preamble）
     assert appended["a"] == {"role": "assistant", "content": "约好了 PNV1"}
+
+
+def test_fast_path_hit_records_history(monkeypatch):
+    """fast_path 查询绕过 LLM，但其 Q&A 仍写入历史，保证'约刚才第一辆'能接上。"""
+    from bot import handler
+    from bot.agent_pool import agent_pool
+
+    appended = []
+    monkeypatch.setattr(agent_pool, "append_turn",
+                        lambda uid, u, a: appended.append((uid, u, a)))
+    handler._record_fast_path_history("ou_a", "查可用车", "📋 共 3 辆可用…")
+    assert appended == [("ou_a",
+                         {"role": "user", "content": "查可用车"},
+                         {"role": "assistant", "content": "📋 共 3 辆可用…"})]

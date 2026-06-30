@@ -130,6 +130,7 @@ def _handle(data: P2ImMessageReceiveV1) -> None:
     fast = _try_fast_query(text, user_id, role)
     if fast:
         log.info("fast_path_handled text=%r", text[:50])
+        _record_fast_path_history(user_id, text, fast)
         sender.send_text_as_card(chat_id, fast)
         return
 
@@ -291,6 +292,14 @@ _FAST_QUERY_AVAILABLE_RE = re.compile(
 _FAST_QUERY_MY_RESV_RE = re.compile(r"(我.{0,2}预约|查我.{0,2}预约|我的预约|我的记录)")
 # 待审批（仅 admin/调度员）
 _FAST_QUERY_PENDING_RE = re.compile(r"(待审批|我的审批|审批列表|待我审批)")
+
+
+def _record_fast_path_history(user_id: str, text: str, reply: str) -> None:
+    """fast_path 命中也写入多轮历史，保证后续对话能引用刚查到的结果。"""
+    agent_pool.append_turn(
+        user_id,
+        {"role": "user", "content": text},
+        {"role": "assistant", "content": reply})
 
 
 def _try_fast_query(text: str, user_id: str, role: int) -> str | None:
