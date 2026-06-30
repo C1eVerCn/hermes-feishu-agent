@@ -464,6 +464,44 @@ def fetch_user_approval(
     ])
 
 
+# ── 10. pull_pending_feishu_message（飞书消息出队，供 message_pump 投递）─────────
+# Java @Tool（dmz-fmp-mcp 新增）arg0=appKey, arg1=limit
+# 注：这两个工具是 bot-internal（message_pump 调用），不对 LLM 暴露（不在 register.py）。
+
+@mcp.tool()
+def pull_pending_feishu_message(appKey: str = "", limit: int = 50) -> dict:
+    """拉取最近 24h 内未成功的飞书消息列表（供飞书机器人发送）。
+
+    appKey: 飞书机器人鉴权 AppKey（必填，须与后端 feishu.bot.openApi.appKey 一致）。
+    limit:  本次最多拉取条数，默认 50，最大 200。
+    返回 {code, data:[{id, receiverEmail, receiverMobile, title, content, bizType, ...}]}。
+    """
+    if not appKey:
+        return {"code": 400, "message": "appKey 不能为空", "data": None}
+    return _call_fmp_tool_args("pull_pending_feishu_message", [appKey, limit])
+
+
+# ── 11. report_feishu_message_result（回报发送结果）──────────────────────────
+# Java @Tool arg0=appKey, arg1=id, arg2=status(1成功/2失败), arg3=errorMsg, arg4=sendTimeMs
+
+@mcp.tool()
+def report_feishu_message_result(
+    appKey: str = "",
+    id: str = "",
+    status: int = 0,
+    errorMsg: str = "",
+    sendTimeMs: int = 0,
+) -> dict:
+    """回报某条飞书消息的发送结果。
+
+    status: 1 成功 / 2 失败（失败时 errorMsg 必填）。sendTimeMs: 实际发送时间戳(ms)。
+    """
+    if not appKey or not id or status not in (1, 2):
+        return {"code": 400, "message": "appKey/id 必填，status 须为 1 或 2", "data": None}
+    return _call_fmp_tool_args(
+        "report_feishu_message_result", [appKey, id, status, errorMsg, sendTimeMs])
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -23,11 +23,21 @@ class Settings:
     FEISHU_ENCRYPT_KEY: str = field(default_factory=lambda: os.getenv("FEISHU_ENCRYPT_KEY", ""))
     FEISHU_VERIFY_TOKEN: str = field(default_factory=lambda: os.getenv("FEISHU_VERIFY_TOKEN", ""))
 
+    # 飞书消息出队投递（后端 feishu_message_record → bot 拉取发送）。
+    # FEISHU_BOT_APP_KEY 须与后端 nacos 的 feishu.bot.openApi.appKey 一致；
+    # 留空则消息泵不启动（功能 inert，不影响其余）。
+    FEISHU_BOT_APP_KEY: str = field(default_factory=lambda: os.getenv("FEISHU_BOT_APP_KEY", "").strip())
+    FEISHU_MSG_POLL_INTERVAL: int = field(default_factory=lambda: int(os.getenv("FEISHU_MSG_POLL_INTERVAL", "30")))
+    FEISHU_MSG_POLL_LIMIT: int = field(default_factory=lambda: int(os.getenv("FEISHU_MSG_POLL_LIMIT", "50")))
+
     MINIMAX_API_KEY: str = field(default_factory=lambda: _require("MINIMAX_API_KEY"))
     MINIMAX_BASE_URL: str = field(default_factory=lambda: _optional("MINIMAX_BASE_URL", "https://api.minimax.chat/v1"))
     MINIMAX_MODEL: str = field(default_factory=lambda: _optional("MINIMAX_MODEL", "MiniMax-Text-01"))
+    # 2026-06-30：M3 (MiniMax-M3) 走 anthropic 兼容端点时必须用 anthropic_messages
+    # api_mode 才能用 tool_use。OpenAI chat_completions mode 下 M3 不识别 tools。
+    MINIMAX_API_MODE: str = field(default_factory=lambda: _optional("MINIMAX_API_MODE", "anthropic_messages"))
 
-    AGENT_MAX_ITERATIONS: int = field(default_factory=lambda: int(os.getenv("AGENT_MAX_ITERATIONS", "30")))
+    AGENT_MAX_ITERATIONS: int = field(default_factory=lambda: int(os.getenv("AGENT_MAX_ITERATIONS", "10")))
     AGENT_TIMEOUT_SECONDS: int = field(default_factory=lambda: int(os.getenv("AGENT_TIMEOUT_SECONDS", "120")))
     AGENT_POOL_MAX_SIZE: int = field(default_factory=lambda: int(os.getenv("AGENT_POOL_MAX_SIZE", "100")))
 

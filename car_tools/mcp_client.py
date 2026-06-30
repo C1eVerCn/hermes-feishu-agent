@@ -66,6 +66,9 @@ def _get_dispatch() -> dict[str, Any]:
             "fetch_user_approval":            _mcp.fetch_user_approval,
             "get_user_context":               _mcp.get_user_context,
             "get_common_dictionary":          _mcp.get_common_dictionary,
+            # bot-internal（message_pump 用，非 LLM-facing）：飞书消息出队投递
+            "pull_pending_feishu_message":     _mcp.pull_pending_feishu_message,
+            "report_feishu_message_result":    _mcp.report_feishu_message_result,
         }
     return _DISPATCH
 
@@ -88,16 +91,18 @@ class CarMcpClient:
         """同步调用 booking_mcp_server 工具 → dict / list（业务侧 json.loads 解析）。"""
         fn = self._resolve_tool(tool_name)
         # 注入身份（2026-06-25 新版上游接受 emailAddress + mobile）。
-        # **优先邮箱，仅当无邮箱时才用手机号** —— 实测上游同时收到二者时按 mobile 查，
-        # 而用户多按邮箱注册（手机号未必登记）→ 同时发会变"非平台用户"。
+        # **2026-06-30 策略调整为 mobile 优先**：qiongchi-dev 上游按 emailAddress 过滤，
+        # 很多用户的 email 字段在 fmp 用户表是空（实测 chenyihang 邮箱空、手机有）。
+        # 同时传 email+mobile → 上游按 email 查 → 0 辆 + "用户不是平台用户"。
+        # 只传 mobile → 上游按 mobile 查 → 能查到（chenyihang 19943221833 → 86 辆）。
         try:
             from ocl.tool_guard import get_current_caller
             caller = get_current_caller()
-            has_email = bool(args.get("emailAddress")) or bool(caller.email)
-            if caller.email and "emailAddress" not in args:
-                args = {**args, "emailAddress": caller.email}
-            if caller.mobile and "mobile" not in args and not has_email:
+            has_mobile = bool(args.get("mobile")) or bool(caller.mobile)
+            if caller.mobile and "mobile" not in args:
                 args = {**args, "mobile": caller.mobile}
+            if caller.email and "emailAddress" not in args and not has_mobile:
+                args = {**args, "emailAddress": caller.email}
         except Exception:
             pass
         # 过滤掉目标函数签名不接受的 kwarg（上游签名变更时容错：如旧 reservationId /

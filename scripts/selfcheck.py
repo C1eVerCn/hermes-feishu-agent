@@ -42,8 +42,7 @@ _STALE_DOC_GLOBS = ["README.md", "docs/architecture.md", "docs/deployment.md",
                     "docs/design-decisions.md"]
 
 _KEY_MODULES = ["config.settings", "ocl.pipeline", "ocl.permission",
-                "bot.handler", "bot.agent_pool", "bot.card_action_handler",
-                "bot.car_state", "car_tools.register",
+                "bot.handler", "bot.agent_pool", "car_tools.register",
                 "hermes_plugins.feishu_acl"]
 
 
@@ -96,7 +95,7 @@ def check_imports() -> Result:
 def check_settings_invariants() -> Result:
     errs = []
     src = (ROOT / "config" / "settings.py").read_text(encoding="utf-8")
-    for var, want in (("AGENT_MAX_ITERATIONS", "30"), ("AGENT_TIMEOUT_SECONDS", "120")):
+    for var, want in (("AGENT_MAX_ITERATIONS", "10"), ("AGENT_TIMEOUT_SECONDS", "120")):
         m = re.search(rf'{var}.*getenv\(\s*["\']{var}["\']\s*,\s*["\'](\d+)["\']', src)
         if not m:
             errs.append(f"{var}: 未找到默认值字面量")

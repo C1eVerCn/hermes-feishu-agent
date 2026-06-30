@@ -46,6 +46,14 @@ _VEHICLE_STATUS_INT_TO_CN = {
     3: "维保",
     4: "报废",
 }
+# 2026-06-30：return_vehicle LLM 友好层 —— 接受中文/英文/数字字符串，统一转 int（1-4）。
+# 原 bot/return_fsm._STATUS_CODE 字典的等价映射搬到这里，给 handlers.return_vehicle 调。
+_VEHICLE_STATUS_NAME_TO_INT = {
+    "可用": 1, "正常": 1, "good": 1, "available": 1,
+    "故障": 2, "坏": 2, "broken": 2, "fault": 2,
+    "维保": 3, "保养": 3, "maintenance": 3,
+    "报废": 4, "scrapped": 4, "scrap": 4,
+}
 
 
 def _normalize_reservation_status(raw: Any) -> str:
@@ -76,6 +84,30 @@ def _normalize_vehicle_status(raw: Any) -> str:
     if isinstance(raw, str):
         return raw.strip()
     return str(raw) if raw is not None else ""
+
+
+def coerce_vehicle_status_to_int(raw: Any) -> int | None:
+    """2026-06-30：return_vehicle 入参层把 LLM 给的 vehicleStatus 归一为 int 1-4。
+
+    接受：int / 数字字符串 / 中文名（可用/故障/维保/报废）/ 英文（good/available/...）。
+    无法识别 → None（让 handler 直接透传，避免静默改值）。
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return None  # 防御 bool → int
+    if isinstance(raw, int):
+        return raw if raw in (1, 2, 3, 4) else None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s in _VEHICLE_STATUS_NAME_TO_INT:
+            return _VEHICLE_STATUS_NAME_TO_INT[s]
+        try:
+            n = int(s)
+            return n if n in (1, 2, 3, 4) else None
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def vehicle_status_to_cn(raw: Any) -> str:

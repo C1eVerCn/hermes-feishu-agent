@@ -72,22 +72,31 @@ _reg(
 )
 
 
-# ── 3. _commit（LLM 不可见；仅 card_action_handler.confirm 流程调用） ─────
+# ── 3. _commit（真实下单；接受 LLM 调起，受 session 级 dry_run 守卫保护） ─────
 _reg(
     "_commit_vehicle_reservation",
-    "**真正下单**（不暴露给 LLM）。仅供 bot.card_action_handler.confirm 流程调用，"
-    "用户点 [确认] 卡片后由系统触发。",
+    "**真实下单工具**（两步流程第二步，**必走**）。\n\n"
+    "**前置条件（必满足）**：\n"
+    "1. 本会话内最近一次 `_dry_run_vehicle_reservation` 调用已完整返回（无 missing_fields）\n"
+    "2. 用户在最近一轮对话中明确确认（说「确认/好/可以/ok/对/同意/是」等）\n"
+    "3. 本次调用的 6 个必填字段（vehicleNo、vehicleType、platform、startTime、endTime、"
+    "taskName、location 中的必填子集）必须与最近一次 dry_run 返回的 args 一致\n"
+    "4. 距最近一次 dry_run 不超过 10 分钟\n\n"
+    "守卫（handler 内部）会拒绝不符合上述任一条件的调用并返回 error。\n\n"
+    "调用范式：先调 _dry_run_vehicle_reservation 完整返回 → 把 summary 用对话话术念给用户 → "
+    "用户确认后 → 调本工具（参数与 dry_run 一致）。",
     {
-        "vehicleNo":    {"type": "string"},
-        "vehicleType":  {"type": "string"},
-        "platform":     {"type": "string"},
-        "licensePlate": {"type": "string"},
-        "startTime":    {"type": "string"},
-        "endTime":      {"type": "string"},
-        "taskName":     {"type": "string"},
-        "location":     {"type": "string"},
-        "remark":       {"type": "string"},
-        "vin":          {"type": "string"},
+        "vehicleNo":    {"type": "string", "description": "车辆编号（如 PNV332 / SVV027）"},
+        "vehicleType":  {"type": "string", "description": "车辆类型（如 DM2 / CT1 / 大F车）"},
+        "platform":     {"type": "string", "description": "芯片平台（Xavier / ADCU / Orin / Thor）",
+                        "enum": ["Xavier", "ADCU", "Orin", "Thor"]},
+        "licensePlate": {"type": "string", "description": "车牌号（可选）"},
+        "startTime":    {"type": "string", "description": "开始时间 yyyy-MM-dd HH:mm"},
+        "endTime":      {"type": "string", "description": "结束时间 yyyy-MM-dd HH:mm"},
+        "taskName":     {"type": "string", "description": "任务名称"},
+        "location":     {"type": "string", "description": "预约地点"},
+        "remark":       {"type": "string", "description": "备注（可选）"},
+        "vin":          {"type": "string", "description": "VIN 码（可选）"},
     },
     ["vehicleNo", "startTime", "endTime", "taskName", "location"],
     handlers._commit_single_vehicle_reservation,

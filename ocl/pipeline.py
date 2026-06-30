@@ -43,16 +43,15 @@ def apply(response: str, user_id: str, captured: list[dict] | None = None) -> Oc
             block_msg = getattr(settings, "OCL_CONTENT_BLOCK_MESSAGE", _BLOCK_MESSAGE)
             return OclResult(text=block_msg, blocked=True, block_reason=content.reason, card=None)
 
-        # 2.5 Intent guard — 拒绝与台架/VLM 无关的 LLM 闲聊回复
-        # （用户要求：连 1+1 / 天气都不要答，统一引导到正常业务流程）
+        # 2.5 Intent guard — 2026-06-30 Phase 1.5 改造：放软硬拦截。
+        # 历史：用户原要求"连 1+1 都不答"；本次改造目标是"最大化 LLM 角色"——
+        # 闲聊由 LLM 自然应对（系统提示已教），OCL 不再硬拦。
+        # 保留 check() 与 REDIRECT_MESSAGE 以便回滚或下游复用。
         intent = intent_filter.check(text)
         if intent.redirected:
-            return OclResult(
-                text=intent_filter.REDIRECT_MESSAGE,
-                blocked=False,
-                block_reason="off_topic_chitchat",
-                card=None,  # 让引导话术用 text-as-card 渲染，保留视觉一致
-            )
+            log.info("intent_filter_softened marker=%s user_id=%s — passing LLM's natural reply",
+                     intent.matched_marker, user_id)
+            # 透传：让 LLM 自己的回复（按新系统提示礼貌引导回约车）走到用户面前
 
         # 3. Length limit
         text = length_limiter.apply(text)

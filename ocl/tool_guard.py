@@ -44,6 +44,9 @@ class CallerIdentity:
 _caller: contextvars.ContextVar[CallerIdentity] = contextvars.ContextVar(
     "ocl_caller", default=CallerIdentity()
 )
+_session: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ocl_session", default=""
+)
 
 
 def set_current_caller(caller: CallerIdentity) -> None:
@@ -55,6 +58,18 @@ def set_current_caller(caller: CallerIdentity) -> None:
 def get_current_caller() -> CallerIdentity:
     """Return the current caller's identity. Default is anonymous."""
     return _caller.get()
+
+
+def set_current_session(session_id: str) -> None:
+    """Inject hermes session_id for the current call context (used by tool_capture
+    and commit-guard). Pass "" to clear. The session_id is what handler.py generates
+    per-user (stable across turns until agent is evicted)."""
+    _session.set(session_id or "")
+
+
+def get_current_session() -> str:
+    """Return the current session_id (default "" = unset)."""
+    return _session.get()
 
 
 def get_caller_dict() -> dict:

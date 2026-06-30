@@ -12,10 +12,9 @@ import time
 import uvicorn
 
 from config.settings import settings
-from feishu.ws_client import start_ws_supervision, set_card_action_handler
+from feishu.ws_client import start_ws_supervision
 from bot.agent_pool import agent_pool
 from bot.handler import start_consumer
-from bot.card_action_handler import handle as card_action_handle
 from infra.health import app
 
 
@@ -91,10 +90,6 @@ def main() -> None:
         force=True,
     )
 
-    # Inject the deterministic card-callback handler into the WS layer
-    # (keeps feishu/ free of bot/ imports).
-    set_card_action_handler(card_action_handle)
-
     # Pre-warm the agent pool BEFORE opening the health port, so /health
     # accurately reports ws_connected=true and the bot is fully ready.
     _prewarm_agent_pool()
@@ -106,6 +101,13 @@ def main() -> None:
 
     consumer_thread.start()
     ws_thread.start()
+
+    # 飞书消息出队投递泵：仅当配置了 FEISHU_BOT_APP_KEY 时启动（否则 inert）。
+    if settings.FEISHU_BOT_APP_KEY:
+        from feishu.message_pump import run_pump
+        threading.Thread(target=run_pump, daemon=True, name="feishu-msg-pump").start()
+    else:
+        logging.getLogger(__name__).info("feishu_message_pump 未启动（FEISHU_BOT_APP_KEY 未配置）")
 
     uvicorn.run(app, host="0.0.0.0", port=settings.HTTP_PORT, log_level="warning")
 

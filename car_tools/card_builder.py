@@ -1,16 +1,15 @@
-"""车辆预约业务专用卡片构建器（5 套卡片）。
+"""车辆预约业务专用卡片构建器（只读展示卡）。
 
-与 ocl/card_builder.py 的关系：
-- ocl/card_builder.py 保留 —— 给 Agent 路径的 LLM 输出兜底（默认行为）
-- car_tools/card_builder.py 是**业务专用**卡片，给 Layer 0.5/0.6/状态机
-  工具返回用，比通用卡片更精准（按钮 + 摘要 + 表格）。
+2026-06-29 改造：卡片只做**展示**，去掉所有交互元素（按钮 / select_static / form）。
+用户通过**对话打字**操作（如回复「1」「确认」「+30」或车辆编号），由 FSM 解析。
+卡片美观地呈现信息（编号列表 / 摘要 / 记录），不再承载点击/填表。
 
-卡片清单：
-1. vehicles_card       — fetch_available_vehicles 成功（带 [选N] 按钮）
-2. missing_fields_card — _dry_run 缺字段（无按钮，引导用户回复）
-3. confirm_card        — _dry_run 全部齐全（[确认] [取消] 按钮）
-4. success_card        — _commit_vehicle_reservation 成功（无按钮，展示详情 + 调度员）
-5. fail_card           — 任何工具返回 {"error": ...}（无按钮）
+卡片清单（均无交互元素）：
+1. vehicles_card       — 可用车辆列表（编号表 + 引导打字选车）
+2. success_card        — 预约成功详情 + 调度员
+3. fail_card           — 错误展示
+4. cancel_confirm_card — 取消二次确认（引导回复「确认/算了」）
+5. records_card        — 我的预约 / 待审批记录（引导打字取消）
 """
 import json
 from typing import Optional
@@ -33,25 +32,11 @@ def _hr() -> dict:
     return {"tag": "hr"}
 
 
-def _button(text: str, value: dict, btype: str = "default") -> dict:
-    return {"tag": "button", "text": {"tag": "plain_text", "content": text},
-            "type": btype, "value": value}
-
-
-def _action(buttons: list[dict]) -> dict:
-    return {"tag": "action", "actions": buttons}
-
-
 def _card_base(elements: list[dict]) -> dict:
-    """Card 2.0 schema 包装（2026-06-18 review：所有卡片必须用 Card 2.0 才能
-    渲染 select_static 等新组件；Card 1.0 schema 飞书客户端静默忽略 select_static）。
+    """Card 2.0 schema 包装。
 
-    Card 2.0 也不支持 `tag: "action"` 容器（飞书 ErrCode 200861）；本函数自动
-    展平 action 包装，调用方写 `{"tag":"action","actions":[...btn...]}` 也能
-    正确发 Card 2.0。
-
-    lark-oapi CardBuilder.to_dict（channel/card/builder.py:307-320）输出也是
-    这个结构。
+    2026-06-30 Phase 1.6：删去 _button / _action / _button_row（卡片只做展示不交互）。
+    action 容器展平逻辑保留（防御性 — 飞书 Card 2.0 不支持 tag:"action" 容器）。
     """
     flat: list[dict] = []
     for e in elements:
@@ -66,33 +51,7 @@ def _card_base(elements: list[dict]) -> dict:
     }
 
 
-def _button_row(buttons: list[dict]) -> dict:
-    """横排按钮组（Card 2.0 column_set + column 结构）。
-
-    飞书 Card 2.0 button 直接放在 body.elements 会**垂直**堆叠（一行一个），
-    移动端尤其占空间。column_set + column 容器让飞书客户端横排展示（PC 宽屏
-    一行多个按钮；移动端自动降级为多行）。
-
-    与 lark-oapi builder.py:159 的 buttons() 输出结构一致：
-        {"tag": "column_set", "columns": [
-            {"tag": "column", "elements": [btn1]},
-            {"tag": "column", "elements": [btn2]},
-            ...
-        ]}
-
-    buttons 必须是已构造好的 button dict 列表（用 _button(...) 生成）。
-    weight=1 让飞书自动均分宽度。
-    """
-    return {
-        "tag": "column_set",
-        "columns": [
-            {"tag": "column", "elements": [btn], "weight": 1}
-            for btn in buttons
-        ],
-    }
-
-
-# ── 1. 车辆列表卡片（带 [选N] 按钮） ──────────────────────────────────────
+# ── 1. 车辆列表卡片（只读展示，引导打字选车） ──────────────────────────────
 
 # 用户约定的显示限制（CLAUDE.md / 产品需求）：
 #   - 默认各芯片（platform）最多返回 3 辆
@@ -144,17 +103,9 @@ def _vehicle_last_n(vno: str, n: int = 6) -> str:
 def build_vehicles_card(vehicles: list[dict], *,
                          summary: Optional[str] = None,
                          query_label: Optional[str] = None) -> dict:
-    """渲染可用车辆列表 + 「选 1..N」按钮。
+    """渲染可用车辆列表（只读展示卡），用户回复编号或车辆号选车。
 
-    显示规则（按产品要求）：
-    - 每芯片（Xavier / ADCU / Orin / Thor）最多 3 辆
-    - 总共最多 10 辆
-    - 表格只显示「序号」+「车辆编号后六位」（车牌号等其他字段在点选后由
-      select_vehicle callback 读出，不直接展示）
-    - 「选 N」按钮的 value 里编码完整 vehicle_no 等信息供 callback 反查
-
-    vehicles: list[Vehicle.model_dump()]，至少含 vehicle_no / vehicle_type / platform。
-    query_label: 用户查询条件（如「大Fcar-Thor」），会作为小标题展示在卡片上。
+    2026-06-30 Phase 1.6：描述从"FSM 解析"改为"agent LLM 解析"——卡片依然只展示。
     """
     if not vehicles:
         elements = [_div("📋 当前没有可用车辆。请尝试调整时间或车辆类型。")]
@@ -162,52 +113,27 @@ def build_vehicles_card(vehicles: list[dict], *,
 
     limited = _limit_vehicles_for_display(vehicles)
 
-    # 2026-06-18 紧凑化：减少冗余文字、单 div 内嵌表格，紧凑排版适合移动端
     title = summary or f"📋 共 {len(limited)} 辆可用"
     if query_label:
         title = f"📋 {query_label} · {len(limited)} 辆"
-    head_lines = [f"**{title}**（10 分钟内未选作废）"]
-    elements: list[dict] = [_div("\n".join(head_lines))]
+    elements: list[dict] = [_div(f"**{title}**（10 分钟内未选作废）")]
 
-    # 表格：仅显示 序号 + 后六位（紧凑 markdown）
+    # 表格：序号 + 后六位（紧凑 markdown）
     lines = ["| # | 编号（后六位） |",
              "|---|------------|"]
     for i, v in enumerate(limited, 1):
-        vno = v.get("vehicle_no", "")
-        last6 = _vehicle_last_n(vno, 6)
+        last6 = _vehicle_last_n(v.get("vehicle_no", ""), 6)
         lines.append(f"| {i} | `{last6}` |")
     elements.append(_div("\n".join(lines)))
-
-    # 横排按钮组（column_set + column，移动端自动降级为多行）
-    select_buttons = [
-        _button(f"选 {i+1}",
-                {"action": "select_vehicle",
-                 "vehicle_no": v.get("vehicle_no", ""),
-                 "vehicle_type": v.get("vehicle_type", ""),
-                 "platform": v.get("platform", ""),
-                 "license_plate": v.get("license_plate", ""),
-                 "vin": v.get("vin", "")},
-                "primary")
-        for i, v in enumerate(limited)
-    ]
-    cancel_btn = _button("取消", {"action": "cancel_flow"}, "danger")
-    # 选车按钮横排 + 取消按钮单独一行（避免取消和选车混在一起误触）
-    elements.append(_button_row(select_buttons))
-    elements.append(_button_row([cancel_btn]))
+    # 引导打字
+    elements.append(_div("💬 回复 **编号**（如「1」）选车，或直接报车辆号；说「算了」退出"))
     return _card_base(elements)
 
 
 # ── 2. 成功卡片（无按钮，展示详情 + 调度员） ────────────────────────────────
 
 def build_success_card(result: dict) -> dict:
-    """_commit_vehicle_reservation 成功时展示详情 + 调度员列表。
-
-    2026-06-18 review 删 build_missing_fields_card / build_confirm_card：FSM 流程
-    已接管（_handle_select_vehicle → fsm.advance → DURATION_CONFIRM 选时段 →
-    INPUT_TASK → INPUT_LOCATION → CONFIRM → COMMIT）。仅被
-    test_car_card_builder.py 用，生产无 caller。
-    2026-06-24 review fix：去重 dispatchers 块（之前 line 210-223 完全重复两份）。
-    """
+    """_commit_vehicle_reservation 成功时展示详情 + 调度员列表。"""
     dispatchers = result.get("dispatchers") or []
     dispatcher_text = "（无）"
     if dispatchers:
@@ -246,61 +172,51 @@ def build_fail_card(error: str, *, context: str = "") -> dict:
     ])
 
 
-# ── mutation 二次确认卡（Tier-2 cancel 等危险操作） ──────────────────────────
+# ── mutation 二次确认卡（cancel 等危险操作） ─────────────────────────────────
 
 def build_cancel_confirm_card(vehicle_no: str, start_time: str = "") -> dict:
-    """取消预约二次确认卡：[确认取消] / [放弃]。
-
-    确认按钮 value 携带要执行的操作与车辆编号（无状态，回调端重建参数执行）。
-    """
+    """取消预约二次确认卡（只读展示，引导回复「确认/算了」）。"""
     when = f"\n⏱️ 时段：{start_time}" if start_time else ""
     return _card_base([
         _div(f"⚠️ **确认取消预约？**\n\n"
              f"🚗 车辆编号：**{vehicle_no}**{when}\n\n"
-             f"取消后该预约将作废，无法恢复。请确认："),
-        _button_row([
-            _button("✅ 确认取消", {"action": "confirm_mutation",
-                                "mutation": "cancel", "vehicle_no": vehicle_no}, "danger"),
-            _button("↩️ 放弃", {"action": "cancel_flow"}, "default"),
-        ]),
+             f"取消后该预约将作废，无法恢复。\n\n"
+             f"💬 回复「**确认**」取消，或「**算了**」放弃。"),
     ])
 
 
-# ── 3. 预约/审批记录卡片（fast-path 用） ────────────────────────────────────
+# ── 3. 预约/审批记录卡片 ──────────────────────────────────────────────────
 
 def build_records_card(records: list, *, title: str, show_cancel: bool = False) -> dict:
-    """我的预约 / 我的待审批 记录卡。records 是 list[dict]，每个含 vehicle_no/platform/
-    start_time/end_time/task_name/status。空列表显示「暂无记录」。
-
-    2026-06-26：从单块 markdown 表格改成**每条一个 div**，并在 ``show_cancel=True`` 且该条
-    为「待审批」时挂一个 [❌ 取消该预约] 按钮 —— 让用户**不依赖 LLM**、直接点按钮取消
-    （走 card_action_handler 的 cancel_record → 二次确认 → cancel）。
-    """
+    """我的预约 / 我的待审批 记录卡（只读展示）。"""
     if not records:
         return _card_base([_div(f"📋 {title}\n\n（暂无记录）")])
     _badge = {"待审批": "🟡待审批", "已批准": "🟢已批准", "已驳回": "🔴已驳回",
               "已取消": "⚪已取消", "已归还": "✅已归还", "已完成": "✅已完成"}
     elements: list[dict] = [_div(f"📋 **{title}**")]
+    has_pending = False
     for r in records:
         if not isinstance(r, dict):
             continue
         status = r.get("status", "")
         badge = _badge.get(status, status or "-")
         vno = r.get("vehicle_no", "")
-        vno_short = vno[-6:] if vno and len(vno) >= 6 else vno
+        # 待审批且可取消的，显示完整编号（方便打字取消）；其余显示后六位
+        if show_cancel and status == "待审批" and vno:
+            has_pending = True
+            vno_disp = f"`{vno}`"
+        else:
+            vno_disp = f"`{vno[-6:] if vno and len(vno) >= 6 else vno}`"
         line = (
-            f"{badge}  `{vno_short}`  {r.get('platform') or '-'}\n"
+            f"{badge}  {vno_disp}  {r.get('platform') or '-'}\n"
             f"⏱️ {r.get('start_time','')} ~ {r.get('end_time','')}\n"
             f"📝 {r.get('task_name') or '-'}　📍 {r.get('location') or '-'}"
         )
         elements.append(_div(line))
-        if show_cancel and status == "待审批" and vno:
-            elements.append(_button_row([
-                _button("❌ 取消该预约",
-                        {"action": "cancel_record", "vehicle_no": vno,
-                         "start_time": r.get("start_time", "")}, "danger"),
-            ]))
         elements.append(_hr())
     if elements and elements[-1].get("tag") == "hr":
         elements.pop()  # 去掉最后一条多余的分隔线
+    if show_cancel and has_pending:
+        elements.append(_div("💬 要取消某条待审批预约，回复「**取消 <车辆编号>**」"))
     return _card_base(elements)
+
